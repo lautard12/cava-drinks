@@ -1,0 +1,1 @@
+ALTER TABLE public.restaurant_items ADD COLUMN is_offer boolean NOT NULL DEFAULT false;
