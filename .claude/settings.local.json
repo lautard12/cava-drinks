@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -E \"\\\\.\\(md|yml|yaml|rules|instructions\\)$\")",
+      "Bash(ls -la C:/Users/Lautaro/Desktop/Software/cava-drinks/*.config.*)",
+      "Bash(grep -r \"export async function\" C:/Users/Lautaro/Desktop/Software/cava-drinks/src/lib/*.ts)"
+    ]
+  }
+}
