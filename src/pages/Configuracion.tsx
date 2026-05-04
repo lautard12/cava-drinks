@@ -2,6 +2,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CatalogoTab } from "@/components/config/CatalogoTab";
 import { PreciosTab } from "@/components/config/PreciosTab";
 import { OfertasTab } from "@/components/config/OfertasTab";
+import { GastosTab } from "@/components/config/GastosTab";
 import { AccesosTab } from "@/components/config/AccesosTab";
 
 export default function Configuracion() {
@@ -14,12 +15,14 @@ export default function Configuracion() {
           <TabsTrigger value="catalogo">Catálogo</TabsTrigger>
           <TabsTrigger value="precios">Precios y Cobros</TabsTrigger>
           <TabsTrigger value="ofertas">Ofertas</TabsTrigger>
+          <TabsTrigger value="gastos">Gastos</TabsTrigger>
           <TabsTrigger value="accesos">Accesos</TabsTrigger>
         </TabsList>
 
         <TabsContent value="catalogo"><CatalogoTab /></TabsContent>
         <TabsContent value="precios"><PreciosTab /></TabsContent>
         <TabsContent value="ofertas"><OfertasTab /></TabsContent>
+        <TabsContent value="gastos"><GastosTab /></TabsContent>
         <TabsContent value="accesos"><AccesosTab /></TabsContent>
       </Tabs>
     </div>

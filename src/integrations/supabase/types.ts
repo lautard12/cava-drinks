@@ -10,7 +10,32 @@ export type Database = {
   // Allows to automatically instantiate createClient with right options
   // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
   __InternalSupabase: {
-    PostgrestVersion: "14.1"
+    PostgrestVersion: "14.5"
+  }
+  graphql_public: {
+    Tables: {
+      [_ in never]: never
+    }
+    Views: {
+      [_ in never]: never
+    }
+    Functions: {
+      graphql: {
+        Args: {
+          extensions?: Json
+          operationName?: string
+          query?: string
+          variables?: Json
+        }
+        Returns: Json
+      }
+    }
+    Enums: {
+      [_ in never]: never
+    }
+    CompositeTypes: {
+      [_ in never]: never
+    }
   }
   public: {
     Tables: {
@@ -59,6 +84,33 @@ export type Database = {
         }
         Relationships: []
       }
+      expense_categories: {
+        Row: {
+          created_at: string
+          id: string
+          is_active: boolean
+          is_pass_through_default: boolean
+          name: string
+          sort_order: number
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          is_pass_through_default?: boolean
+          name: string
+          sort_order?: number
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          is_pass_through_default?: boolean
+          name?: string
+          sort_order?: number
+        }
+        Relationships: []
+      }
       expenses: {
         Row: {
           amount: number
@@ -66,6 +118,7 @@ export type Database = {
           created_at: string
           created_by: string
           date: string
+          deleted_at: string | null
           description: string | null
           fund: string
           id: string
@@ -79,6 +132,7 @@ export type Database = {
           created_at?: string
           created_by?: string
           date: string
+          deleted_at?: string | null
           description?: string | null
           fund: string
           id?: string
@@ -92,6 +146,7 @@ export type Database = {
           created_at?: string
           created_by?: string
           date?: string
+          deleted_at?: string | null
           description?: string | null
           fund?: string
           id?: string
@@ -107,6 +162,7 @@ export type Database = {
           created_at: string
           created_by: string
           date: string
+          deleted_at: string | null
           description: string | null
           fund: string
           id: string
@@ -117,6 +173,7 @@ export type Database = {
           created_at?: string
           created_by?: string
           date: string
+          deleted_at?: string | null
           description?: string | null
           fund: string
           id?: string
@@ -127,6 +184,7 @@ export type Database = {
           created_at?: string
           created_by?: string
           date?: string
+          deleted_at?: string | null
           description?: string | null
           fund?: string
           id?: string
@@ -292,6 +350,7 @@ export type Database = {
           amount: number
           commission_amount: number
           commission_pct: number
+          created_at: string
           fund: string
           id: string
           installments: number
@@ -302,6 +361,7 @@ export type Database = {
           amount: number
           commission_amount?: number
           commission_pct?: number
+          created_at?: string
           fund: string
           id?: string
           installments?: number
@@ -312,6 +372,7 @@ export type Database = {
           amount?: number
           commission_amount?: number
           commission_pct?: number
+          created_at?: string
           fund?: string
           id?: string
           installments?: number
@@ -389,6 +450,7 @@ export type Database = {
           offer_price_snapshot: number | null
           owner: string
           product_id: string | null
+          promotion_id: string | null
           qty: number
           restaurant_item_id: string | null
           sale_id: string
@@ -413,6 +475,7 @@ export type Database = {
           offer_price_snapshot?: number | null
           owner: string
           product_id?: string | null
+          promotion_id?: string | null
           qty: number
           restaurant_item_id?: string | null
           sale_id: string
@@ -437,6 +500,7 @@ export type Database = {
           offer_price_snapshot?: number | null
           owner?: string
           product_id?: string | null
+          promotion_id?: string | null
           qty?: number
           restaurant_item_id?: string | null
           sale_id?: string
@@ -527,30 +591,6 @@ export type Database = {
           tab_name?: string | null
           total?: number
           updated_at?: string | null
-        }
-        Relationships: []
-      }
-      price_settings: {
-        Row: {
-          credit_1_pct: number
-          credit_3_pct: number
-          debit_pct: number
-          id: number
-          updated_at: string
-        }
-        Insert: {
-          credit_1_pct?: number
-          credit_3_pct?: number
-          debit_pct?: number
-          id?: number
-          updated_at?: string
-        }
-        Update: {
-          credit_1_pct?: number
-          credit_3_pct?: number
-          debit_pct?: number
-          id?: number
-          updated_at?: string
         }
         Relationships: []
       }
@@ -844,6 +884,7 @@ export type Database = {
           created_by: string
           id: string
           product_id: string
+          purchase_id: string | null
           qty: number
           reason: string
           sale_id: string | null
@@ -855,6 +896,7 @@ export type Database = {
           created_by?: string
           id?: string
           product_id: string
+          purchase_id?: string | null
           qty: number
           reason?: string
           sale_id?: string | null
@@ -866,6 +908,7 @@ export type Database = {
           created_by?: string
           id?: string
           product_id?: string
+          purchase_id?: string | null
           qty?: number
           reason?: string
           sale_id?: string | null
@@ -878,6 +921,13 @@ export type Database = {
             columns: ["product_id"]
             isOneToOne: false
             referencedRelation: "products"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "stock_movements_purchase_id_fkey"
+            columns: ["purchase_id"]
+            isOneToOne: false
+            referencedRelation: "stock_purchases"
             referencedColumns: ["id"]
           },
           {
@@ -1005,33 +1055,6 @@ export type Database = {
         }
         Relationships: []
       }
-      surcharge_tiers: {
-        Row: {
-          created_at: string
-          id: string
-          name: string
-          percentage: number
-          slug: string
-          sort_order: number
-        }
-        Insert: {
-          created_at?: string
-          id?: string
-          name: string
-          percentage?: number
-          slug: string
-          sort_order?: number
-        }
-        Update: {
-          created_at?: string
-          id?: string
-          name?: string
-          percentage?: number
-          slug?: string
-          sort_order?: number
-        }
-        Relationships: []
-      }
       user_roles: {
         Row: {
           id: string
@@ -1132,6 +1155,24 @@ export type Database = {
       }
     }
     Functions: {
+      create_purchase: {
+        Args: {
+          p_items: Json
+          p_notes: string
+          p_payment_fund: string
+          p_payment_method: string
+          p_purchase_date: string
+          p_supplier_id: string
+          p_supplier_name_snapshot: string
+          p_update_cost_prices?: boolean
+        }
+        Returns: string
+      }
+      decrement_stock: {
+        Args: { p_product_id: string; p_qty: number }
+        Returns: undefined
+      }
+      delete_purchase: { Args: { p_purchase_id: string }; Returns: undefined }
       get_user_role: {
         Args: { _user_id: string }
         Returns: Database["public"]["Enums"]["app_role"]
@@ -1271,6 +1312,9 @@ export type CompositeTypes<
     : never
 
 export const Constants = {
+  graphql_public: {
+    Enums: {},
+  },
   public: {
     Enums: {
       app_role: ["admin", "cajero", "cocina"],

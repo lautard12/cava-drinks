@@ -23,7 +23,7 @@ import {
   type TabSaleItem,
 } from "@/lib/tab-store";
 import { fetchRestaurantCategories } from "@/lib/restaurant-store";
-import { fetchSurchargeTiers, type SurchargeTier } from "@/lib/price-store";
+import { fetchPriceTerms, type PriceTerm } from "@/lib/config-store";
 import {
   fetchActiveOffersForPOS,
   consolidateStockRequirements,
@@ -107,7 +107,7 @@ export default function POS() {
 
   // Settings
   const [channel, setChannel] = useState<Channel>("RESTAURANTE");
-  const [priceTerm, setPriceTerm] = useState<string>("BASE");
+  const [priceTerm, setPriceTerm] = useState<string>("");
   const [deliveryFee, setDeliveryFee] = useState(0);
 
   // Cart (local state for DELIVERY, DB-backed for RESTAURANTE tabs)
@@ -150,10 +150,23 @@ export default function POS() {
     queryKey: ["restaurant-categories"],
     queryFn: fetchRestaurantCategories,
   });
-  const { data: surchargeTiers = [] } = useQuery<SurchargeTier[]>({
-    queryKey: ["surcharge-tiers"],
-    queryFn: fetchSurchargeTiers,
+  const { data: priceTerms = [] } = useQuery<PriceTerm[]>({
+    queryKey: ["price-terms"],
+    queryFn: fetchPriceTerms,
   });
+  const activePriceTerms = useMemo(
+    () => priceTerms.filter((t) => t.is_active).sort((a, b) => a.sort_order - b.sort_order),
+    [priceTerms],
+  );
+  const anchorTerm = useMemo(
+    () => activePriceTerms.find((t) => t.sort_order === 0 && t.surcharge_pct === 0) ?? null,
+    [activePriceTerms],
+  );
+
+  // Inicializar priceTerm con el ancla cuando cargan los terms.
+  useEffect(() => {
+    if (!priceTerm && anchorTerm) setPriceTerm(anchorTerm.code);
+  }, [anchorTerm, priceTerm]);
   const { data: activeOffers = [] } = useQuery({
     queryKey: ["pos-active-offers"],
     queryFn: fetchActiveOffersForPOS,
@@ -161,20 +174,19 @@ export default function POS() {
 
   const isTabMode = channel === "RESTAURANTE" && activeTab !== null;
 
-  // Build term labels from dynamic tiers
+  // Etiquetas y orden vienen de price_terms.
   const termLabels = useMemo(() => {
-    const labels: Record<string, string> = { BASE: "Efectivo" };
-    for (const t of surchargeTiers) labels[t.slug] = t.name;
+    const labels: Record<string, string> = {};
+    for (const t of activePriceTerms) labels[t.code] = t.label;
     return labels;
-  }, [surchargeTiers]);
+  }, [activePriceTerms]);
 
-  const allTerms = useMemo(() => ["BASE", ...surchargeTiers.map(t => t.slug)], [surchargeTiers]);
+  const allTerms = useMemo(() => activePriceTerms.map((t) => t.code), [activePriceTerms]);
 
-  // Helper: get surcharge multiplier for restaurant items based on price term
+  // Multiplicador de recargo para ítems de restaurante (no tienen tabla product_prices).
   const getFoodSurchargeMultiplier = (term: string) => {
-    if (term === "BASE") return 1;
-    const tier = surchargeTiers.find(t => t.slug === term);
-    return tier ? 1 + tier.percentage / 100 : 1;
+    const t = activePriceTerms.find((x) => x.code === term);
+    return t ? 1 + t.surcharge_pct / 100 : 1;
   };
 
   const applyFoodSurcharge = (basePrice: number, term: string) => {
@@ -188,10 +200,9 @@ export default function POS() {
   }, [products]);
 
   const getSurchargePct = useCallback(() => {
-    if (priceTerm === "BASE") return 0;
-    const tier = surchargeTiers.find(t => t.slug === priceTerm);
-    return tier?.percentage ?? 0;
-  }, [priceTerm, surchargeTiers]);
+    const t = activePriceTerms.find((x) => x.code === priceTerm);
+    return t?.surcharge_pct ?? 0;
+  }, [priceTerm, activePriceTerms]);
 
   // Stock map for offer validation
   const stockMap = useMemo(() => {
@@ -400,7 +411,7 @@ export default function POS() {
         }
         setTabOperating(true);
         try {
-          const basePrice = p.prices[`${channel}_BASE`] ?? price;
+          const basePrice = (anchorTerm ? p.prices[`${channel}_${anchorTerm.code}`] : undefined) ?? price;
           const item: CartItem = {
             id: `temp-${++cartIdCounter}`,
             owner: "LOCAL",
@@ -440,7 +451,7 @@ export default function POS() {
         toast({ title: "Sin stock", description: p.name, variant: "destructive" });
         return;
       }
-      const basePrice = p.prices[`${channel}_BASE`] ?? price;
+      const basePrice = (anchorTerm ? p.prices[`${channel}_${anchorTerm.code}`] : undefined) ?? price;
       setCart((prev) => [
         ...prev,
         {
@@ -752,7 +763,7 @@ export default function POS() {
     if (isTabMode && activeTab) {
       setTabOperating(true);
       try {
-        await updateTabPriceTerm(activeTab.id, t, products, restaurantItems, surchargeTiers);
+        await updateTabPriceTerm(activeTab.id, t, products, restaurantItems, activePriceTerms);
         await reloadTabItems(activeTab.id);
       } catch (e: any) {
         toast({ title: "Error al cambiar término", description: e.message, variant: "destructive" });
@@ -846,7 +857,7 @@ export default function POS() {
           )}
         </div>
         <p className="text-xs text-muted-foreground">
-          {priceTerm !== "BASE" ? `Recargo ${termLabels[priceTerm] ?? priceTerm} aplicado a todos los ítems` : "QR/Transferencia/Tarjeta → MercadoPago"}
+          {getSurchargePct() > 0 ? `Recargo ${termLabels[priceTerm] ?? priceTerm} aplicado a todos los ítems` : "Precio sin recargos"}
         </p>
       </div>
 
@@ -1018,7 +1029,7 @@ export default function POS() {
                       </div>
                       <div className="flex items-center gap-2">
                         <span className="font-semibold text-sm">${applyFoodSurcharge(item.price, priceTerm).toLocaleString("es-AR")}</span>
-                        {priceTerm !== "BASE" && (
+                        {getSurchargePct() > 0 && (
                           <span className="text-xs text-muted-foreground line-through">${item.price.toLocaleString("es-AR")}</span>
                         )}
                         <Button size="sm" variant="outline" className="h-7" onClick={() => addFoodItem(item)}>
@@ -1318,8 +1329,9 @@ export default function POS() {
         deliveryFee={totalDeliveryFee}
         onConfirm={handleConfirmSale}
         loading={saving}
-        initialPaymentMethod={priceTerm === "BASE" ? "EFECTIVO" : "TARJETA"}
+        initialPaymentMethod={getSurchargePct() === 0 ? "EFECTIVO" : "TARJETA"}
         priceTerm={priceTerm}
+        priceTerms={activePriceTerms}
         isClosingTab={isTabMode}
       />
 

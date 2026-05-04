@@ -49,3 +49,40 @@ export async function deleteSupplier(id: string) {
     .eq("id", id);
   if (error) throw error;
 }
+
+export interface ProductPurchaseHistoryRow {
+  purchase_date: string;
+  supplier_name: string;
+  qty: number;
+  unit_cost: number;
+  line_total: number;
+}
+
+// Historial de compras de un producto (todos los proveedores, ordenado desc).
+export async function fetchProductPurchaseHistory(
+  productId: string,
+  limit = 20,
+): Promise<ProductPurchaseHistoryRow[]> {
+  const { data, error } = await supabase
+    .from("stock_purchase_items")
+    .select("qty, unit_cost, line_total, stock_purchases!inner(purchase_date, supplier_name_snapshot)")
+    .eq("product_id", productId)
+    .order("stock_purchases(purchase_date)", { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return (data ?? []).map((r) => {
+    const row = r as unknown as {
+      qty: number;
+      unit_cost: number;
+      line_total: number;
+      stock_purchases: { purchase_date: string; supplier_name_snapshot: string };
+    };
+    return {
+      purchase_date: row.stock_purchases.purchase_date,
+      supplier_name: row.stock_purchases.supplier_name_snapshot,
+      qty: row.qty,
+      unit_cost: row.unit_cost,
+      line_total: row.line_total,
+    };
+  });
+}

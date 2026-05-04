@@ -6,13 +6,14 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { toast } from "@/hooks/use-toast";
-import { Plus, Trash2, Save, RefreshCw } from "lucide-react";
+import { Save, RefreshCw, ExternalLink } from "lucide-react";
+import { recalculateAllPrices, findAnchor } from "@/lib/price-store";
 import {
-  fetchSurchargeTiers, addSurchargeTier, updateSurchargeTier, deleteSurchargeTier,
-  recalculateAllPrices, ensureAllProductsHaveTier,
-  type SurchargeTier,
-} from "@/lib/price-store";
+  fetchPriceTerms, updatePriceTerm, type PriceTerm,
+} from "@/lib/config-store";
+import { Link } from "react-router-dom";
 
 interface Props {
   open: boolean;
@@ -24,97 +25,53 @@ export default function CreditSettings({ open, onOpenChange }: Props) {
   const [saving, setSaving] = useState(false);
   const [recalculating, setRecalculating] = useState(false);
 
-  // Editable local state
-  const [localTiers, setLocalTiers] = useState<(SurchargeTier & { _dirty?: boolean })[]>([]);
-  const [newName, setNewName] = useState("");
-  const [newPct, setNewPct] = useState("");
-  const [adding, setAdding] = useState(false);
+  const [localTerms, setLocalTerms] = useState<(PriceTerm & { _dirty?: boolean })[]>([]);
 
-  const { data: tiers = [] } = useQuery<SurchargeTier[]>({
-    queryKey: ["surcharge-tiers"],
-    queryFn: fetchSurchargeTiers,
+  const { data: terms = [] } = useQuery<PriceTerm[]>({
+    queryKey: ["price-terms"],
+    queryFn: fetchPriceTerms,
   });
+  const anchor = findAnchor(terms);
 
-  // Sync from server when tiers change
   const [lastSynced, setLastSynced] = useState<string>("");
-  const tiersKey = tiers.map(t => t.id).join(",");
-  if (tiersKey !== lastSynced && tiers.length > 0) {
-    setLocalTiers(tiers.map(t => ({ ...t })));
-    setLastSynced(tiersKey);
+  const termsKey = terms.map((t) => t.id).join(",");
+  if (termsKey !== lastSynced && terms.length > 0) {
+    setLocalTerms(terms.map((t) => ({ ...t })));
+    setLastSynced(termsKey);
   }
 
-  const updateLocal = (id: string, field: "name" | "percentage", value: string) => {
-    setLocalTiers(prev => prev.map(t =>
-      t.id === id
-        ? { ...t, [field]: field === "percentage" ? parseFloat(value) || 0 : value, _dirty: true }
-        : t
-    ));
+  const updateLocal = (id: string, value: string) => {
+    setLocalTerms((prev) =>
+      prev.map((t) =>
+        t.id === id ? { ...t, surcharge_pct: parseFloat(value) || 0, _dirty: true } : t,
+      ),
+    );
   };
 
   const handleSaveAll = async () => {
-    const dirty = localTiers.filter(t => t._dirty);
+    const dirty = localTerms.filter((t) => t._dirty);
     if (dirty.length === 0) {
       toast({ title: "Sin cambios" });
+      return;
+    }
+    // Validación: el ancla no puede tener recargo distinto de 0.
+    const dirtyAnchor = dirty.find((t) => t.id === anchor?.id);
+    if (dirtyAnchor && dirtyAnchor.surcharge_pct !== 0) {
+      toast({ title: "El ancla siempre tiene recargo 0%", variant: "destructive" });
       return;
     }
     setSaving(true);
     try {
       for (const t of dirty) {
-        await updateSurchargeTier(t.id, t.name, t.percentage);
+        await updatePriceTerm(t.id, { surcharge_pct: t.surcharge_pct });
       }
-      queryClient.invalidateQueries({ queryKey: ["surcharge-tiers"] });
-      queryClient.invalidateQueries({ queryKey: ["price-settings"] });
+      queryClient.invalidateQueries({ queryKey: ["price-terms"] });
+      queryClient.invalidateQueries({ queryKey: ["cfg-price-terms"] });
       toast({ title: "Porcentajes actualizados" });
-    } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } catch (e) {
+      toast({ title: "Error", description: e instanceof Error ? e.message : String(e), variant: "destructive" });
     } finally {
       setSaving(false);
-    }
-  };
-
-  const generateSlug = (name: string) => {
-    return name.trim().toUpperCase().replace(/\s+/g, "_").replace(/[^A-Z0-9_]/g, "");
-  };
-
-  const handleAdd = async () => {
-    if (!newName.trim() || !newPct) return;
-    const slug = generateSlug(newName);
-    if (!slug) {
-      toast({ title: "Nombre inválido", variant: "destructive" });
-      return;
-    }
-    if (localTiers.some(t => t.slug === slug)) {
-      toast({ title: "Ya existe un recargo con ese identificador", variant: "destructive" });
-      return;
-    }
-    setAdding(true);
-    try {
-      const tier = await addSurchargeTier(newName.trim(), slug, parseFloat(newPct) || 0);
-      // Create product_prices rows for all products
-      await ensureAllProductsHaveTier(slug);
-      queryClient.invalidateQueries({ queryKey: ["surcharge-tiers"] });
-      queryClient.invalidateQueries({ queryKey: ["price-settings"] });
-      queryClient.invalidateQueries({ queryKey: ["price-completeness"] });
-      setNewName("");
-      setNewPct("");
-      toast({ title: `"${tier.name}" agregado` });
-    } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
-    } finally {
-      setAdding(false);
-    }
-  };
-
-  const handleDelete = async (tier: SurchargeTier) => {
-    if (!confirm(`¿Eliminar "${tier.name}"? Se borrarán los precios asociados.`)) return;
-    try {
-      await deleteSurchargeTier(tier.id);
-      queryClient.invalidateQueries({ queryKey: ["surcharge-tiers"] });
-      queryClient.invalidateQueries({ queryKey: ["price-settings"] });
-      queryClient.invalidateQueries({ queryKey: ["price-completeness"] });
-      toast({ title: `"${tier.name}" eliminado` });
-    } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
     }
   };
 
@@ -124,87 +81,69 @@ export default function CreditSettings({ open, onOpenChange }: Props) {
       await recalculateAllPrices();
       queryClient.invalidateQueries({ queryKey: ["price-completeness"] });
       toast({ title: "Todos los precios recalculados" });
-    } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } catch (e) {
+      toast({ title: "Error", description: e instanceof Error ? e.message : String(e), variant: "destructive" });
     } finally {
       setRecalculating(false);
     }
   };
 
-  const hasDirty = localTiers.some(t => t._dirty);
+  const hasDirty = localTerms.some((t) => t._dirty);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Configuración de Recargos</DialogTitle>
-          <DialogDescription>Porcentajes de recargo globales. Podés agregar nuevos.</DialogDescription>
+          <DialogTitle>Recargos rápidos</DialogTitle>
+          <DialogDescription>
+            Ajustá los porcentajes. Para crear/eliminar términos andá a{" "}
+            <Link
+              to="/configuracion"
+              className="underline inline-flex items-center gap-1"
+              onClick={() => onOpenChange(false)}
+            >
+              Configuración → Precios y Cobros
+              <ExternalLink className="h-3 w-3" />
+            </Link>
+            .
+          </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-3">
-          {localTiers.map((tier) => (
-            <div key={tier.id} className="flex items-end gap-2">
-              <div className="flex-1 space-y-1">
-                <Label className="text-xs text-muted-foreground">Nombre</Label>
-                <Input
-                  value={tier.name}
-                  onChange={(e) => updateLocal(tier.id, "name", e.target.value)}
-                  className="h-9"
-                />
+          {localTerms.map((t) => {
+            const isAnchor = anchor?.id === t.id;
+            return (
+              <div key={t.id} className="flex items-end gap-2">
+                <div className="flex-1 space-y-1">
+                  <Label className="text-xs text-muted-foreground flex items-center gap-2">
+                    {t.label}
+                    {isAnchor && (
+                      <Badge className="text-[10px] bg-amber-100 text-amber-800 border-amber-300">
+                        ANCLA
+                      </Badge>
+                    )}
+                  </Label>
+                  <Input value={t.label} disabled className="h-9" />
+                </div>
+                <div className="w-24 space-y-1">
+                  <Label className="text-xs text-muted-foreground">%</Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    value={t.surcharge_pct}
+                    disabled={isAnchor}
+                    onChange={(e) => updateLocal(t.id, e.target.value)}
+                    className="h-9"
+                  />
+                </div>
               </div>
-              <div className="w-24 space-y-1">
-                <Label className="text-xs text-muted-foreground">%</Label>
-                <Input
-                  type="number"
-                  min="0"
-                  value={tier.percentage}
-                  onChange={(e) => updateLocal(tier.id, "percentage", e.target.value)}
-                  className="h-9"
-                />
-              </div>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-9 w-9 text-destructive hover:text-destructive shrink-0"
-                onClick={() => handleDelete(tier)}
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
-            </div>
-          ))}
-
-          {/* Add new tier inline */}
-          <div className="flex items-end gap-2 pt-2 border-t border-dashed border-border">
-            <div className="flex-1 space-y-1">
-              <Label className="text-xs text-muted-foreground">Nuevo recargo</Label>
-              <Input
-                placeholder="Ej: Crédito 6 cuotas"
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                className="h-9"
-              />
-            </div>
-            <div className="w-24 space-y-1">
-              <Label className="text-xs text-muted-foreground">%</Label>
-              <Input
-                type="number"
-                min="0"
-                placeholder="35"
-                value={newPct}
-                onChange={(e) => setNewPct(e.target.value)}
-                className="h-9"
-              />
-            </div>
-            <Button
-              variant="outline"
-              size="icon"
-              className="h-9 w-9 shrink-0"
-              onClick={handleAdd}
-              disabled={adding || !newName.trim() || !newPct}
-            >
-              <Plus className="h-4 w-4" />
-            </Button>
-          </div>
+            );
+          })}
+          {localTerms.length === 0 && (
+            <p className="text-sm text-muted-foreground text-center py-4">
+              No hay términos configurados.
+            </p>
+          )}
         </div>
 
         <div className="flex flex-col gap-2 pt-2">
@@ -214,7 +153,12 @@ export default function CreditSettings({ open, onOpenChange }: Props) {
               {saving ? "Guardando..." : "Guardar cambios"}
             </Button>
           )}
-          <Button variant="outline" onClick={handleRecalculate} disabled={recalculating} className="w-full">
+          <Button
+            variant="outline"
+            onClick={handleRecalculate}
+            disabled={recalculating || !anchor}
+            className="w-full"
+          >
             <RefreshCw className={`mr-2 h-4 w-4 ${recalculating ? "animate-spin" : ""}`} />
             {recalculating ? "Recalculando..." : "Recalcular todos los productos"}
           </Button>

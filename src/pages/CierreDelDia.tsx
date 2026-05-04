@@ -12,6 +12,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { RestaurantReceiptModal } from "@/components/cierre/RestaurantReceiptModal";
+import { ArqueoCard } from "@/components/cierre/ArqueoCard";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -24,6 +25,8 @@ import {
   fetchRestaurantPaymentEstimates,
 } from "@/lib/cierre-store";
 import { createExpense, computeFund } from "@/lib/finanzas-store";
+import { fetchExpenseCategories } from "@/lib/config-store";
+import { supabase } from "@/integrations/supabase/client";
 
 const fmt = (n: number) => `$${n.toLocaleString("es-AR")}`;
 
@@ -47,8 +50,19 @@ export default function CierreDelDia() {
   const [rendicionMethod, setRendicionMethod] = useState("EFECTIVO");
   const [rendicionAmount, setRendicionAmount] = useState("");
   const [rendicionDesc, setRendicionDesc] = useState("");
+  const [rendicionCategoryId, setRendicionCategoryId] = useState<string>("");
   const [rendicionSaving, setRendicionSaving] = useState(false);
   const qc = useQueryClient();
+
+  // Categorías pass-through (las que se usan para rendiciones / movimientos que no afectan resultado).
+  const { data: allCategories = [] } = useQuery({
+    queryKey: ["expense-categories"],
+    queryFn: fetchExpenseCategories,
+  });
+  const passThroughCategories = useMemo(
+    () => allCategories.filter((c) => c.is_active && c.is_pass_through_default),
+    [allCategories],
+  );
 
   const dateStr = format(date, "yyyy-MM-dd");
 
@@ -77,15 +91,16 @@ export default function CierreDelDia() {
     queryFn: () => fetchRestaurantPaymentEstimates(dateStr),
   });
 
-  // Check if rendición already exists for this date
+  // Chequear si ya hay alguna rendición (gasto pass-through) registrada hoy.
   const { data: existingRendicion } = useQuery({
     queryKey: ["cierre-rendicion-exists", dateStr],
     queryFn: async () => {
-      const { data } = await (await import("@/integrations/supabase/client")).supabase
+      const { data } = await supabase
         .from("expenses")
         .select("id")
         .eq("date", dateStr)
-        .eq("category", "Rendición restaurante")
+        .eq("is_pass_through", true)
+        .is("deleted_at", null)
         .limit(1);
       return (data?.length ?? 0) > 0;
     },
@@ -135,7 +150,10 @@ export default function CierreDelDia() {
       {loading ? (
         <p className="text-muted-foreground">Cargando...</p>
       ) : !summary || summary.totalCobrado === 0 ? (
-        <p className="text-muted-foreground text-center py-12">No hay ventas registradas para este día.</p>
+        <>
+          <p className="text-muted-foreground text-center py-6">No hay ventas registradas para este día.</p>
+          <ArqueoCard date={dateStr} />
+        </>
       ) : (
         <>
           {/* Summary Cards */}
@@ -282,12 +300,18 @@ export default function CierreDelDia() {
                     <Button variant="outline" disabled>
                       <HandCoins className="h-4 w-4 mr-2" /> Rendición registrada ✓
                     </Button>
+                  ) : passThroughCategories.length === 0 ? (
+                    <Button variant="outline" disabled title="Cargá una categoría pass-through en Configuración → Gastos">
+                      <HandCoins className="h-4 w-4 mr-2" /> Sin categoría pass-through
+                    </Button>
                   ) : (
                     <Button
                       variant="default"
                       onClick={() => {
+                        const first = passThroughCategories[0];
+                        setRendicionCategoryId(first.id);
                         setRendicionAmount(String(summary?.totalRestaurant || 0));
-                        setRendicionDesc(`Rendición restaurante ${format(date, "dd/MM/yyyy")}`);
+                        setRendicionDesc(`${first.name} ${format(date, "dd/MM/yyyy")}`);
                         setRendicionOpen(true);
                       }}
                     >
@@ -320,6 +344,9 @@ export default function CierreDelDia() {
               </CardContent>
             </Card>
           )}
+
+          {/* Arqueo de caja */}
+          <ArqueoCard date={dateStr} />
         </>
       )}
 
@@ -339,6 +366,19 @@ export default function CierreDelDia() {
             <DialogDescription>Este gasto impacta en Capital (salida de fondo) pero NO en Resultado.</DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
+            {passThroughCategories.length > 1 && (
+              <div>
+                <Label>Categoría</Label>
+                <Select value={rendicionCategoryId} onValueChange={setRendicionCategoryId}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {passThroughCategories.map((c) => (
+                      <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
             <div>
               <Label>Monto</Label>
               <Input type="number" value={rendicionAmount} onChange={(e) => setRendicionAmount(e.target.value)} />
@@ -368,18 +408,22 @@ export default function CierreDelDia() {
               onClick={async () => {
                 const amt = parseInt(rendicionAmount);
                 if (!amt || amt <= 0) { toast.error("Monto inválido"); return; }
+                const cat = passThroughCategories.find((c) => c.id === rendicionCategoryId) ?? passThroughCategories[0];
+                if (!cat) { toast.error("No hay categoría pass-through disponible"); return; }
                 setRendicionSaving(true);
                 try {
                   await createExpense({
                     date: dateStr,
                     amount: amt,
                     payment_method: rendicionMethod,
-                    category: "Rendición restaurante",
+                    category: cat.name,
                     description: rendicionDesc,
+                    is_pass_through: true,
                   });
                   toast.success("Rendición registrada");
                   setRendicionOpen(false);
                   qc.invalidateQueries({ queryKey: ["finanzas-resultado"] });
+                  qc.invalidateQueries({ queryKey: ["finanzas-capital"] });
                   qc.invalidateQueries({ queryKey: ["cierre-rendicion-exists", dateStr] });
                 } catch {
                   toast.error("Error al registrar");

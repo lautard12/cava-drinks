@@ -26,3 +26,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Supabase CLI local state (no debe commitearse)
+supabase/.temp/
+supabase/.branches/
+

@@ -169,3 +169,63 @@ export async function updatePriceTerm(
   const { error } = await supabase.from("price_terms").update(updates).eq("id", id);
   if (error) throw error;
 }
+
+// Borra un price_term y los product_prices asociados a su code.
+// El caller debe validar que no sea el ancla antes de invocar.
+export async function deletePriceTerm(id: string) {
+  const { data: term } = await supabase
+    .from("price_terms")
+    .select("code")
+    .eq("id", id)
+    .single();
+
+  if (term?.code) {
+    await supabase.from("product_prices").delete().eq("term", term.code);
+  }
+
+  const { error } = await supabase.from("price_terms").delete().eq("id", id);
+  if (error) throw error;
+}
+
+// ─── Expense Categories ──────────────────────────────────
+
+export interface ExpenseCategory {
+  id: string;
+  name: string;
+  is_pass_through_default: boolean;
+  is_active: boolean;
+  sort_order: number;
+}
+
+// Devuelve TODAS las categorías ordenadas (incluye inactivas — el caller filtra).
+export async function fetchExpenseCategories(): Promise<ExpenseCategory[]> {
+  const { data, error } = await supabase
+    .from("expense_categories")
+    .select("id, name, is_pass_through_default, is_active, sort_order")
+    .order("sort_order");
+  if (error) throw error;
+  return (data ?? []) as ExpenseCategory[];
+}
+
+export async function createExpenseCategory(cat: {
+  name: string;
+  is_pass_through_default: boolean;
+  sort_order: number;
+}) {
+  const { error } = await supabase.from("expense_categories").insert(cat);
+  if (error) throw error;
+}
+
+export async function updateExpenseCategory(
+  id: string,
+  updates: Partial<Pick<ExpenseCategory, "name" | "is_pass_through_default" | "is_active" | "sort_order">>,
+) {
+  const { error } = await supabase.from("expense_categories").update(updates).eq("id", id);
+  if (error) throw error;
+}
+
+// Borrar categoría no afecta gastos históricos (categoría snapshoteada como text).
+export async function deleteExpenseCategory(id: string) {
+  const { error } = await supabase.from("expense_categories").delete().eq("id", id);
+  if (error) throw error;
+}

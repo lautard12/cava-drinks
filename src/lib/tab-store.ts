@@ -83,6 +83,10 @@ export async function createOpenTab(
   cashierId?: string,
   cashierName?: string
 ): Promise<{ id: string; tab_name: string | null }> {
+  if (!cashierId) {
+    throw new Error("No hay cajero autenticado. Iniciá sesión antes de abrir una cuenta.");
+  }
+
   const { data, error } = await supabase
     .from("pos_sales")
     .insert({
@@ -94,7 +98,7 @@ export async function createOpenTab(
       subtotal_local: 0,
       subtotal_restaurant: 0,
       total: 0,
-      ...(cashierId ? { cashier_id: cashierId } : {}),
+      cashier_id: cashierId,
       cashier_name_snapshot: cashierName ?? "",
     })
     .select("id, tab_name")
@@ -237,33 +241,42 @@ export async function closeTab(
   surchargePct: number,
   cashierId?: string
 ) {
+  if (!cashierId) {
+    throw new Error("No hay cajero autenticado. Iniciá sesión antes de cerrar la cuenta.");
+  }
+
   const items = await fetchTabItems(saleId);
   if (items.length === 0) throw new Error("La cuenta no tiene ítems");
 
   const { data: sale, error: se } = await supabase
     .from("pos_sales")
-    .select("total, subtotal_local, subtotal_restaurant")
+    .select("total")
     .eq("id", saleId)
     .single();
   if (se) throw se;
   const total = sale.total;
 
-  // Build consolidated stock requirements (regular products + offer components)
-  const stockRequired: Record<string, number> = {};
+  // Recolectar componentes de ofertas para los items OFFER que tenga la cuenta.
   const offerItems = items.filter((i) => i.item_type === "OFFER" && i.offer_id);
-  const regularLocalItems = items.filter((i) => i.owner === "LOCAL" && i.product_id && i.item_type !== "OFFER");
+  const regularLocalItems = items.filter(
+    (i) => i.owner === "LOCAL" && i.product_id && i.item_type !== "OFFER",
+  );
 
-  // Get all product IDs we need info for
-  const allProductIds = new Set<string>();
-  regularLocalItems.forEach((i) => allProductIds.add(i.product_id!));
+  const stockRequired: Record<string, { qty: number; name: string }> = {};
+  const offerLabelByPid: Record<string, string> = {};
+  const offerComponentsByItem: Record<
+    string,
+    { product_id: string; name: string; qty: number; unit_cost: number; line_cost: number }[]
+  > = {};
 
-  // For offers, fetch their components from the offers table
-  const offerIds = [...new Set(offerItems.map((i) => i.offer_id!))];
-  let offerComponentsMap: Record<string, { product_id: string; qty: number; name: string; cost: number }[]> = {};
+  if (offerItems.length > 0) {
+    const offerIds = [...new Set(offerItems.map((i) => i.offer_id!))];
 
-  if (offerIds.length > 0) {
-    // Verify offers are still active
-    const { data: offers } = await supabase.from("offers").select("id, name, is_active").in("id", offerIds);
+    // Verificar que las ofertas sigan activas.
+    const { data: offers } = await supabase
+      .from("offers")
+      .select("id, name, is_active")
+      .in("id", offerIds);
     for (const o of offers ?? []) {
       if (!o.is_active) {
         throw new Error(`La oferta "${o.name}" fue desactivada. No se puede cobrar.`);
@@ -271,132 +284,106 @@ export async function closeTab(
     }
 
     const { data: oiData } = await supabase.from("offer_items").select("*").in("offer_id", offerIds);
+    const componentProductIds = (oiData ?? []).map((d: { product_id: string }) => d.product_id);
     const { data: oiProducts } = await supabase
       .from("products")
       .select("id, name, variant_label, cost_price, track_stock")
-      .in("id", (oiData ?? []).map((d: any) => d.product_id));
-    const prodInfoMap: Record<string, any> = {};
-    for (const p of oiProducts ?? []) prodInfoMap[p.id] = p;
+      .in("id", componentProductIds);
 
-    for (const oi of oiData ?? []) {
-      if (!offerComponentsMap[oi.offer_id]) offerComponentsMap[oi.offer_id] = [];
+    const prodInfoMap: Record<
+      string,
+      { id: string; name: string; variant_label: string; cost_price: number; track_stock: boolean }
+    > = {};
+    for (const p of (oiProducts ?? []) as typeof oiProducts) {
+      if (p) prodInfoMap[p.id] = p as typeof prodInfoMap[string];
+    }
+
+    // Agrupar componentes por offer_id.
+    const componentsByOffer: Record<
+      string,
+      { product_id: string; qty: number; name: string; cost: number; track_stock: boolean }[]
+    > = {};
+    for (const oi of (oiData ?? []) as { offer_id: string; product_id: string; qty: number }[]) {
+      if (!componentsByOffer[oi.offer_id]) componentsByOffer[oi.offer_id] = [];
       const prod = prodInfoMap[oi.product_id];
-      offerComponentsMap[oi.offer_id].push({
+      componentsByOffer[oi.offer_id].push({
         product_id: oi.product_id,
         qty: oi.qty,
         name: prod ? prod.name + (prod.variant_label ? ` ${prod.variant_label}` : "") : "?",
         cost: prod?.cost_price ?? 0,
+        track_stock: prod?.track_stock ?? false,
       });
-      allProductIds.add(oi.product_id);
     }
 
-    // Add offer component stock requirements
     for (const item of offerItems) {
-      const components = offerComponentsMap[item.offer_id!];
+      const components = componentsByOffer[item.offer_id!];
       if (!components) continue;
+
+      offerComponentsByItem[item.id] = components.map((c) => ({
+        product_id: c.product_id,
+        name: c.name,
+        qty: c.qty * item.qty,
+        unit_cost: c.cost,
+        line_cost: c.cost * c.qty * item.qty,
+      }));
+
       for (const c of components) {
-        const prod = prodInfoMap[c.product_id];
-        if (prod?.track_stock) {
-          stockRequired[c.product_id] = (stockRequired[c.product_id] ?? 0) + c.qty * item.qty;
+        offerLabelByPid[c.product_id] = item.offer_name_snapshot ?? "Oferta";
+        if (c.track_stock) {
+          if (!stockRequired[c.product_id]) {
+            stockRequired[c.product_id] = { qty: 0, name: c.name };
+          }
+          stockRequired[c.product_id].qty += c.qty * item.qty;
         }
       }
     }
   }
 
-  // Add regular product stock requirements
   if (regularLocalItems.length > 0) {
     const pids = regularLocalItems.map((i) => i.product_id!);
-    const { data: prods } = await supabase.from("products").select("id, track_stock").in("id", pids);
+    const { data: prods } = await supabase
+      .from("products")
+      .select("id, track_stock")
+      .in("id", pids);
     const trackMap: Record<string, boolean> = {};
-    for (const p of prods ?? []) trackMap[p.id] = p.track_stock;
+    for (const p of (prods ?? []) as { id: string; track_stock: boolean }[]) {
+      trackMap[p.id] = p.track_stock;
+    }
 
     for (const item of regularLocalItems) {
       if (trackMap[item.product_id!]) {
-        stockRequired[item.product_id!] = (stockRequired[item.product_id!] ?? 0) + item.qty;
+        if (!stockRequired[item.product_id!]) {
+          stockRequired[item.product_id!] = { qty: 0, name: item.name_snapshot };
+        }
+        stockRequired[item.product_id!].qty += item.qty;
       }
     }
   }
 
-  // Validate all stock
-  const allPids = Object.keys(stockRequired);
-  if (allPids.length > 0) {
-    const { data: balances } = await supabase
-      .from("stock_balances")
-      .select("product_id, qty_on_hand")
-      .in("product_id", allPids);
-    const balMap: Record<string, number> = {};
-    for (const b of balances ?? []) balMap[b.product_id] = b.qty_on_hand;
+  const stockRequiredArray = Object.entries(stockRequired).map(([product_id, v]) => ({
+    product_id,
+    qty: v.qty,
+    name: v.name,
+  }));
 
-    for (const [pid, needed] of Object.entries(stockRequired)) {
-      const available = balMap[pid] ?? 0;
-      if (needed > available) {
-        const item = items.find((i) => i.product_id === pid);
-        throw new Error(`Stock insuficiente para "${item?.name_snapshot ?? pid}". Disponible: ${available}, pedido: ${needed}`);
-      }
-    }
-  }
+  const paymentsPayload = payments.map((p) => ({
+    payment_method: p.payment_method,
+    amount: p.amount,
+    surcharge_pct: p.surcharge_pct ?? surchargePct,
+    installments: p.installments ?? 1,
+  }));
 
-  // Insert offer components into pos_sale_item_components
-  for (const item of offerItems) {
-    const components = offerComponentsMap[item.offer_id!];
-    if (!components) continue;
-    const rows = components.map((c) => ({
-      sale_item_id: item.id,
-      product_id: c.product_id,
-      name_snapshot: c.name,
-      qty: c.qty * item.qty,
-      unit_cost_snapshot: c.cost,
-      line_cost: c.cost * c.qty * item.qty,
-    }));
-    const { error: ce } = await supabase.from("pos_sale_item_components").insert(rows);
-    if (ce) throw ce;
-
-    // Update cost_snapshot on the offer sale item
-    const totalCost = rows.reduce((s, r) => s + r.line_cost, 0);
-    await supabase.from("pos_sale_items").update({ cost_snapshot: totalCost }).eq("id", item.id);
-  }
-
-  // Deduct stock
-  for (const [pid, qty] of Object.entries(stockRequired)) {
-    const offerItem = offerItems.find((i) => offerComponentsMap[i.offer_id!]?.some((c) => c.product_id === pid));
-    const reason = offerItem ? `Venta POS — Oferta: ${offerItem.offer_name_snapshot}` : "Venta POS";
-
-    const { error: me } = await supabase.from("stock_movements").insert({
-      product_id: pid, type: "SALE", qty, reason,
-      created_by: cashierId ?? "admin", sale_id: saleId,
-    });
-    if (me) throw me;
-
-    const { data: bal } = await supabase.from("stock_balances").select("qty_on_hand").eq("product_id", pid).single();
-    const newQty = (bal?.qty_on_hand ?? 0) - qty;
-    const { error: ue } = await supabase.from("stock_balances").update({ qty_on_hand: newQty }).eq("product_id", pid);
-    if (ue) throw ue;
-  }
-
-  // Insert payments
-  const paymentRows = payments.map((p) => {
-    const commissionAmount = surchargePct > 0
-      ? Math.round(p.amount * surchargePct / (100 + surchargePct))
-      : 0;
-    return {
-      sale_id: saleId,
-      payment_method: p.payment_method,
-      fund: getFund(p.payment_method),
-      amount: p.amount,
-      commission_amount: commissionAmount,
-      commission_pct: surchargePct,
-      installments: 1,
-    };
+  const { error: rpcErr } = await supabase.rpc("close_tab_atomic", {
+    p_sale_id: saleId,
+    p_cashier_id: cashierId,
+    p_payments: paymentsPayload,
+    p_surcharge_pct: surchargePct,
+    p_stock_required: stockRequiredArray,
+    p_offer_label_by_pid: offerLabelByPid,
+    p_offer_components_by_item: offerComponentsByItem,
   });
-  const { error: ppe } = await supabase.from("pos_payments").insert(paymentRows);
-  if (ppe) throw ppe;
 
-  // Mark COMPLETED
-  const { error: ue2 } = await supabase
-    .from("pos_sales")
-    .update({ status: "COMPLETED", closed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-    .eq("id", saleId);
-  if (ue2) throw ue2;
+  if (rpcErr) throw new Error(rpcErr.message);
 
   return { saleId, total };
 }
@@ -445,7 +432,7 @@ export async function updateTabPriceTerm(
   newTerm: string,
   products: { id: string; prices: Record<string, number> }[],
   restaurantItems: { id: string; price: number }[],
-  surchargeTiers: { slug: string; percentage: number }[]
+  priceTerms: { code: string; surcharge_pct: number }[]
 ) {
   // 1. Update price_term on the sale
   const { error: ue } = await supabase
@@ -457,9 +444,9 @@ export async function updateTabPriceTerm(
   // 2. Get current items
   const items = await fetchTabItems(saleId);
 
-  // 3. Get surcharge multiplier for restaurant items
-  const tier = surchargeTiers.find((t) => t.slug === newTerm);
-  const multiplier = newTerm === "BASE" ? 1 : tier ? 1 + tier.percentage / 100 : 1;
+  // 3. Get surcharge multiplier for restaurant items (los del local salen de product_prices).
+  const term = priceTerms.find((t) => t.code === newTerm);
+  const multiplier = term ? 1 + term.surcharge_pct / 100 : 1;
 
   // 4. Update each item's price
   for (const item of items) {
