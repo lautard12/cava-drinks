@@ -1,10 +1,9 @@
 import { useState, useMemo } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { format } from "date-fns";
 import { es } from "date-fns/locale";
-import { CalendarIcon, DollarSign, Truck, UtensilsCrossed, Store, Printer, ChevronDown, HandCoins } from "lucide-react";
+import { CalendarIcon, DollarSign, Truck, UtensilsCrossed, Store, Printer, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Calendar } from "@/components/ui/calendar";
@@ -13,20 +12,12 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { RestaurantReceiptModal } from "@/components/cierre/RestaurantReceiptModal";
 import { ArqueoCard } from "@/components/cierre/ArqueoCard";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import {
   fetchDaySummary,
   fetchPaymentBreakdown,
   fetchProductLines,
   fetchRestaurantPaymentEstimates,
 } from "@/lib/cierre-store";
-import { createExpense, computeFund } from "@/lib/finanzas-store";
-import { fetchExpenseCategories } from "@/lib/config-store";
-import { supabase } from "@/integrations/supabase/client";
 
 const fmt = (n: number) => `$${n.toLocaleString("es-AR")}`;
 
@@ -46,23 +37,6 @@ export default function CierreDelDia() {
   const [date, setDate] = useState<Date>(new Date());
   const [receiptOpen, setReceiptOpen] = useState(false);
   const [estimatesOpen, setEstimatesOpen] = useState(false);
-  const [rendicionOpen, setRendicionOpen] = useState(false);
-  const [rendicionMethod, setRendicionMethod] = useState("EFECTIVO");
-  const [rendicionAmount, setRendicionAmount] = useState("");
-  const [rendicionDesc, setRendicionDesc] = useState("");
-  const [rendicionCategoryId, setRendicionCategoryId] = useState<string>("");
-  const [rendicionSaving, setRendicionSaving] = useState(false);
-  const qc = useQueryClient();
-
-  // Categorías pass-through (las que se usan para rendiciones / movimientos que no afectan resultado).
-  const { data: allCategories = [] } = useQuery({
-    queryKey: ["expense-categories"],
-    queryFn: fetchExpenseCategories,
-  });
-  const passThroughCategories = useMemo(
-    () => allCategories.filter((c) => c.is_active && c.is_pass_through_default),
-    [allCategories],
-  );
 
   const dateStr = format(date, "yyyy-MM-dd");
 
@@ -90,23 +64,6 @@ export default function CierreDelDia() {
     queryKey: ["cierre-rest-estimates", dateStr],
     queryFn: () => fetchRestaurantPaymentEstimates(dateStr),
   });
-
-  // Chequear si ya hay alguna rendición (gasto pass-through) registrada hoy.
-  const { data: existingRendicion } = useQuery({
-    queryKey: ["cierre-rendicion-exists", dateStr],
-    queryFn: async () => {
-      const { data } = await supabase
-        .from("expenses")
-        .select("id")
-        .eq("date", dateStr)
-        .eq("is_pass_through", true)
-        .is("deleted_at", null)
-        .limit(1);
-      return (data?.length ?? 0) > 0;
-    },
-  });
-
-  const rendicionDone = existingRendicion === true;
 
   // Aggregate payments by method and by fund
   const byMethod = useMemo(() => {
@@ -296,28 +253,6 @@ export default function CierreDelDia() {
                   <Button variant="outline" onClick={() => setReceiptOpen(true)}>
                     <Printer className="h-4 w-4 mr-2" /> Ver comprobante
                   </Button>
-                  {rendicionDone ? (
-                    <Button variant="outline" disabled>
-                      <HandCoins className="h-4 w-4 mr-2" /> Rendición registrada ✓
-                    </Button>
-                  ) : passThroughCategories.length === 0 ? (
-                    <Button variant="outline" disabled title="Cargá una categoría pass-through en Configuración → Gastos">
-                      <HandCoins className="h-4 w-4 mr-2" /> Sin categoría pass-through
-                    </Button>
-                  ) : (
-                    <Button
-                      variant="default"
-                      onClick={() => {
-                        const first = passThroughCategories[0];
-                        setRendicionCategoryId(first.id);
-                        setRendicionAmount(String(summary?.totalRestaurant || 0));
-                        setRendicionDesc(`${first.name} ${format(date, "dd/MM/yyyy")}`);
-                        setRendicionOpen(true);
-                      }}
-                    >
-                      <HandCoins className="h-4 w-4 mr-2" /> Registrar rendición
-                    </Button>
-                  )}
                 </div>
 
                 {/* Collapsible estimates */}
@@ -358,85 +293,6 @@ export default function CierreDelDia() {
         total={summary?.totalRestaurant || 0}
       />
 
-      {/* Modal Rendición restaurante */}
-      <Dialog open={rendicionOpen} onOpenChange={setRendicionOpen}>
-        <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Registrar rendición restaurante</DialogTitle>
-            <DialogDescription>Este gasto impacta en Capital (salida de fondo) pero NO en Resultado.</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3">
-            {passThroughCategories.length > 1 && (
-              <div>
-                <Label>Categoría</Label>
-                <Select value={rendicionCategoryId} onValueChange={setRendicionCategoryId}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {passThroughCategories.map((c) => (
-                      <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-            <div>
-              <Label>Monto</Label>
-              <Input type="number" value={rendicionAmount} onChange={(e) => setRendicionAmount(e.target.value)} />
-            </div>
-            <div>
-              <Label>Medio de pago</Label>
-              <Select value={rendicionMethod} onValueChange={setRendicionMethod}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="EFECTIVO">Efectivo</SelectItem>
-                  <SelectItem value="QR">QR</SelectItem>
-                  <SelectItem value="TRANSFERENCIA">Transferencia</SelectItem>
-                  <SelectItem value="TARJETA">Tarjeta</SelectItem>
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground mt-1">Fondo: {computeFund(rendicionMethod)}</p>
-            </div>
-            <div>
-              <Label>Descripción</Label>
-              <Textarea value={rendicionDesc} onChange={(e) => setRendicionDesc(e.target.value)} rows={2} />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setRendicionOpen(false)}>Cancelar</Button>
-            <Button
-              disabled={rendicionSaving}
-              onClick={async () => {
-                const amt = parseInt(rendicionAmount);
-                if (!amt || amt <= 0) { toast.error("Monto inválido"); return; }
-                const cat = passThroughCategories.find((c) => c.id === rendicionCategoryId) ?? passThroughCategories[0];
-                if (!cat) { toast.error("No hay categoría pass-through disponible"); return; }
-                setRendicionSaving(true);
-                try {
-                  await createExpense({
-                    date: dateStr,
-                    amount: amt,
-                    payment_method: rendicionMethod,
-                    category: cat.name,
-                    description: rendicionDesc,
-                    is_pass_through: true,
-                  });
-                  toast.success("Rendición registrada");
-                  setRendicionOpen(false);
-                  qc.invalidateQueries({ queryKey: ["finanzas-resultado"] });
-                  qc.invalidateQueries({ queryKey: ["finanzas-capital"] });
-                  qc.invalidateQueries({ queryKey: ["cierre-rendicion-exists", dateStr] });
-                } catch {
-                  toast.error("Error al registrar");
-                } finally {
-                  setRendicionSaving(false);
-                }
-              }}
-            >
-              {rendicionSaving ? "Guardando…" : "Registrar"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

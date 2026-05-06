@@ -12,33 +12,50 @@ export type Database = {
   __InternalSupabase: {
     PostgrestVersion: "14.5"
   }
-  graphql_public: {
-    Tables: {
-      [_ in never]: never
-    }
-    Views: {
-      [_ in never]: never
-    }
-    Functions: {
-      graphql: {
-        Args: {
-          extensions?: Json
-          operationName?: string
-          query?: string
-          variables?: Json
-        }
-        Returns: Json
-      }
-    }
-    Enums: {
-      [_ in never]: never
-    }
-    CompositeTypes: {
-      [_ in never]: never
-    }
-  }
   public: {
     Tables: {
+      cash_counts: {
+        Row: {
+          counted_amount: number
+          counted_by: string | null
+          counted_by_name: string
+          created_at: string
+          date: string
+          difference: number | null
+          expected_amount: number
+          fund: string
+          id: string
+          notes: string | null
+          updated_at: string
+        }
+        Insert: {
+          counted_amount: number
+          counted_by?: string | null
+          counted_by_name?: string
+          created_at?: string
+          date: string
+          difference?: number | null
+          expected_amount: number
+          fund: string
+          id?: string
+          notes?: string | null
+          updated_at?: string
+        }
+        Update: {
+          counted_amount?: number
+          counted_by?: string | null
+          counted_by_name?: string
+          created_at?: string
+          date?: string
+          difference?: number | null
+          expected_amount?: number
+          fund?: string
+          id?: string
+          notes?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
       cash_opening_balances: {
         Row: {
           amount: number
@@ -1155,6 +1172,39 @@ export type Database = {
       }
     }
     Functions: {
+      _apply_stock_deduction: {
+        Args: {
+          p_cashier_id: string
+          p_offer_label_by_pid: Json
+          p_required: Json
+          p_sale_id: string
+        }
+        Returns: undefined
+      }
+      _insert_payments: {
+        Args: {
+          p_global_surcharge_pct: number
+          p_payments: Json
+          p_sale_id: string
+        }
+        Returns: undefined
+      }
+      _lock_and_validate_stock: {
+        Args: { p_required: Json }
+        Returns: undefined
+      }
+      close_tab_atomic: {
+        Args: {
+          p_cashier_id: string
+          p_offer_components_by_item: Json
+          p_offer_label_by_pid: Json
+          p_payments: Json
+          p_sale_id: string
+          p_stock_required: Json
+          p_surcharge_pct: number
+        }
+        Returns: string
+      }
       create_purchase: {
         Args: {
           p_items: Json
@@ -1165,6 +1215,21 @@ export type Database = {
           p_supplier_id: string
           p_supplier_name_snapshot: string
           p_update_cost_prices?: boolean
+        }
+        Returns: string
+      }
+      create_sale_atomic: {
+        Args: {
+          p_cashier_id: string
+          p_cashier_name: string
+          p_channel: string
+          p_delivery_fee: number
+          p_items: Json
+          p_offer_label_by_pid: Json
+          p_payments: Json
+          p_price_term: string
+          p_stock_required: Json
+          p_surcharge_pct: number
         }
         Returns: string
       }
@@ -1312,9 +1377,6 @@ export type CompositeTypes<
     : never
 
 export const Constants = {
-  graphql_public: {
-    Enums: {},
-  },
   public: {
     Enums: {
       app_role: ["admin", "cajero", "cocina"],

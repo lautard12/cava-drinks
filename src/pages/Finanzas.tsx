@@ -46,6 +46,12 @@ import {
 } from "@/lib/finanzas-store";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { fetchExpenseCategories } from "@/lib/config-store";
+import {
+  fetchSettlementsRange,
+  deleteSettlement,
+  type RestaurantSettlement,
+} from "@/lib/restaurant-settlement-store";
+import { SettlementModal } from "@/components/finanzas/SettlementModal";
 
 const fmt = (n: number) => `$${n.toLocaleString("es-AR")}`;
 
@@ -143,12 +149,21 @@ export default function Finanzas() {
   const [showMovementModal, setShowMovementModal] = useState(false);
   const [movementToDelete, setMovementToDelete] = useState<FundMovement | null>(null);
 
+  const [showSettlementModal, setShowSettlementModal] = useState(false);
+  const [settlementToDelete, setSettlementToDelete] = useState<RestaurantSettlement | null>(null);
+
+  const settlementsQ = useQuery({
+    queryKey: ["finanzas-settlements", from, to],
+    queryFn: () => fetchSettlementsRange(from, to),
+  });
+
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["finanzas-resultado"] });
     qc.invalidateQueries({ queryKey: ["finanzas-day"] });
     qc.invalidateQueries({ queryKey: ["finanzas-restaurante"] });
     qc.invalidateQueries({ queryKey: ["finanzas-gastos"] });
     qc.invalidateQueries({ queryKey: ["finanzas-capital"] });
+    qc.invalidateQueries({ queryKey: ["finanzas-settlements"] });
   };
 
   const rows = resultadoQ.data ?? [];
@@ -444,13 +459,20 @@ export default function Finanzas() {
 
         {/* ─── TAB RESTAURANTE ─── */}
         <TabsContent value="restaurante" className="space-y-4">
+          {/* Card de rendición — siempre arriba, usa los acumulados históricos del query de capital */}
+          <RendicionCard
+            capital={capitalQ.data}
+            loading={capitalQ.isLoading}
+            onRegistrar={() => setShowSettlementModal(true)}
+          />
+
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <KpiCard label="A rendir al restaurante" value={totalRestVendido} icon={UtensilsCrossed} />
+            <KpiCard label="A rendir (en el rango)" value={totalRestVendido} icon={UtensilsCrossed} />
             <KpiCard label="Tickets con comida" value={totalRestTickets} icon={UtensilsCrossed} isCount />
             <KpiCard label="Unidades vendidas" value={totalRestUnidades} icon={Package} isCount />
           </div>
           <p className="text-xs text-muted-foreground">
-            Incluye comida + envío (delivery_fee). El acumulado histórico pendiente de rendir aparece en la tab Capital.
+            Incluye comida + envío (delivery_fee). El "Pendiente" de arriba es histórico, los KPIs son del rango seleccionado.
           </p>
 
           <div className="flex items-center gap-2">
@@ -490,6 +512,57 @@ export default function Finanzas() {
               </Table>
             </div>
           )}
+
+          {/* Rendiciones registradas en el rango */}
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">Rendiciones registradas — {periodLabel}</CardTitle>
+              <CardDescription>
+                Pagos que le hiciste al dueño del restaurante. Cada uno baja el saldo del fondo elegido en la tab Capital.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="overflow-x-auto p-0">
+              {settlementsQ.isLoading ? (
+                <p className="text-muted-foreground text-sm p-4">Cargando…</p>
+              ) : (settlementsQ.data ?? []).length === 0 ? (
+                <p className="text-muted-foreground text-sm p-4">Sin rendiciones en el rango.</p>
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Fecha</TableHead>
+                      <TableHead>Fondo</TableHead>
+                      <TableHead>Notas</TableHead>
+                      <TableHead className="text-right">Monto</TableHead>
+                      <TableHead className="w-10" />
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {(settlementsQ.data ?? []).map((s) => (
+                      <TableRow key={s.id}>
+                        <TableCell>{format(new Date(s.date + "T12:00:00"), "dd/MM/yyyy")}</TableCell>
+                        <TableCell>
+                          <Badge variant="outline">{s.fund === "EFECTIVO" ? "Efectivo" : "MercadoPago"}</Badge>
+                        </TableCell>
+                        <TableCell className="text-muted-foreground text-sm">{s.notes ?? "—"}</TableCell>
+                        <TableCell className="text-right font-medium tabular-nums">{fmt(s.amount)}</TableCell>
+                        <TableCell>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            onClick={() => setSettlementToDelete(s)}
+                            aria-label="Eliminar rendición"
+                          >
+                            <Trash2 className="h-4 w-4 text-destructive" />
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </CardContent>
+          </Card>
         </TabsContent>
       </Tabs>
 
@@ -645,11 +718,115 @@ export default function Finanzas() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <SettlementModal
+        open={showSettlementModal}
+        defaultDate={today}
+        pendiente={capitalQ.data?.pendienteRendirRestaurante ?? 0}
+        onClose={() => setShowSettlementModal(false)}
+        onSaved={() => { invalidate(); setShowSettlementModal(false); }}
+      />
+
+      <AlertDialog
+        open={!!settlementToDelete}
+        onOpenChange={(open) => !open && setSettlementToDelete(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>¿Eliminar esta rendición?</AlertDialogTitle>
+            <AlertDialogDescription>
+              El monto vuelve al saldo del fondo y al pendiente de rendir.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {settlementToDelete && (
+            <div className="text-sm space-y-1 rounded-md border p-3 bg-muted/40">
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Fecha</span>
+                <span className="font-medium">
+                  {format(new Date(settlementToDelete.date + "T12:00:00"), "dd/MM/yyyy")}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Fondo</span>
+                <span className="font-medium">{settlementToDelete.fund}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Monto</span>
+                <span className="font-bold text-destructive">{fmt(settlementToDelete.amount)}</span>
+              </div>
+              {settlementToDelete.notes && (
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Notas</span>
+                  <span className="font-medium">{settlementToDelete.notes}</span>
+                </div>
+              )}
+            </div>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancelar</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={async (ev) => {
+                ev.preventDefault();
+                if (!settlementToDelete) return;
+                try {
+                  await deleteSettlement(settlementToDelete.id);
+                  toast.success("Rendición eliminada");
+                  invalidate();
+                  setSettlementToDelete(null);
+                } catch {
+                  toast.error("No se pudo eliminar");
+                }
+              }}
+            >
+              Eliminar
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
 
 // ─── Sub-components ──────────────────────────────────────────────────
+
+function RendicionCard({
+  capital, loading, onRegistrar,
+}: {
+  capital?: CapitalSnapshot;
+  loading: boolean;
+  onRegistrar: () => void;
+}) {
+  const pendiente = capital?.pendienteRendirRestaurante ?? 0;
+  const isPositive = pendiente > 0;
+
+  return (
+    <Card className={isPositive ? "border-amber-500/40 bg-amber-50/50 dark:bg-amber-950/20" : ""}>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-base flex items-center gap-2">
+          <UtensilsCrossed className="h-4 w-4" />
+          Pendiente de rendir al restaurante
+        </CardTitle>
+        <CardDescription>
+          Plata del restaurante que entró a tu caja y todavía no le devolviste al dueño.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="flex items-end justify-between gap-3">
+          <div>
+            <p className="text-xs text-muted-foreground">Pendiente acumulado (histórico)</p>
+            <p className={`text-2xl font-bold tabular-nums ${isPositive ? "text-amber-700 dark:text-amber-400" : "text-emerald-600"}`}>
+              {loading ? "…" : fmt(pendiente)}
+            </p>
+          </div>
+          <Button onClick={onRegistrar}>
+            <Plus className="h-4 w-4 mr-1" />
+            Registrar rendición
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
 
 function EmptyFinanceState() {
   return (
@@ -1141,7 +1318,7 @@ function CapitalTab({
             Pendiente de rendir al restaurante
           </CardTitle>
           <CardDescription>
-            Plata del restaurante que entró a tu caja y todavía no le devolviste al dueño. Cuando le pagues, registralo como gasto con categoría "{`Rendición restaurante`}" (pass-through).
+            Plata del restaurante que entró a tu caja y todavía no le devolviste al dueño. Para registrar un pago, andá a la tab <strong>Restaurante</strong> → "Registrar rendición".
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-1.5">

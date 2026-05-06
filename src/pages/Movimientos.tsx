@@ -114,7 +114,7 @@ export default function Movimientos() {
         <FilterSelect label="Dirección" value={direction} onChange={setDirection}
           options={[{ v: "ALL", l: "Todas" }, { v: "IN", l: "Entrada" }, { v: "OUT", l: "Salida" }]} />
         <FilterSelect label="Tipo" value={movementType} onChange={setMovementType}
-          options={[{ v: "ALL", l: "Todos" }, { v: "SALE", l: "Venta" }, { v: "EXPENSE", l: "Gasto" }]} />
+          options={[{ v: "ALL", l: "Todos" }, { v: "SALE", l: "Venta" }, { v: "EXPENSE", l: "Gasto" }, { v: "SETTLEMENT", l: "Rendición" }]} />
         <FilterSelect label="Canal" value={channel} onChange={setChannel}
           options={[{ v: "ALL", l: "Todos" }, { v: "RESTAURANTE", l: "Restaurante" }, { v: "DELIVERY", l: "Delivery" }]} />
         <FilterSelect label="Medio" value={paymentMethod} onChange={setPaymentMethod}

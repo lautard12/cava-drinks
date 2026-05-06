@@ -662,8 +662,8 @@ export async function fetchCapitalRange(from: string, to: string): Promise<Capit
     else if (m.type === "RETIRO") salidasMap[fund] += m.amount;
   }
 
-  // Gastos — incluye operativos Y pass-through (rendiciones al restaurante).
-  // La plata sale físicamente del fondo en ambos casos, así que afecta al saldo de caja.
+  // Gastos — incluye operativos Y pass-through legacy (rendiciones viejas
+  // registradas como expense). La plata sale físicamente en ambos casos.
   const { data: expenses } = await supabase
     .from("expenses")
     .select("fund, amount")
@@ -673,6 +673,18 @@ export async function fetchCapitalRange(from: string, to: string): Promise<Capit
   for (const e of expenses ?? []) {
     const fund = e.fund === "EFECTIVO" ? "EFECTIVO" : "MERCADOPAGO";
     salidasMap[fund] += e.amount;
+  }
+
+  // Rendiciones al restaurante (tabla dedicada) — también son salida del fondo.
+  const { data: settlementsRange } = await supabase
+    .from("restaurant_settlements")
+    .select("fund, amount")
+    .gte("date", from)
+    .lte("date", to)
+    .is("deleted_at", null);
+  for (const s of settlementsRange ?? []) {
+    const fund = s.fund === "EFECTIVO" ? "EFECTIVO" : "MERCADOPAGO";
+    salidasMap[fund] += s.amount;
   }
 
   // Compras a proveedores
@@ -715,14 +727,25 @@ export async function fetchCapitalRange(from: string, to: string): Promise<Capit
     0,
   );
 
-  const { data: rendiciones } = await supabase
-    .from("expenses")
-    .select("amount")
-    .eq("category", RENDICION_CATEGORY)
-    .eq("is_pass_through", true)
-    .lte("date", to)
-    .is("deleted_at", null);
-  const totalRendido = (rendiciones ?? []).reduce((sum, r) => sum + r.amount, 0);
+  // Total rendido = settlements nuevos (tabla dedicada) + expenses pass-through
+  // legacy con la categoría reservada. Mantenemos legacy mientras coexistan.
+  const [legacyRendRes, newRendRes] = await Promise.all([
+    supabase
+      .from("expenses")
+      .select("amount")
+      .eq("category", RENDICION_CATEGORY)
+      .eq("is_pass_through", true)
+      .lte("date", to)
+      .is("deleted_at", null),
+    supabase
+      .from("restaurant_settlements")
+      .select("amount")
+      .lte("date", to)
+      .is("deleted_at", null),
+  ]);
+  const totalRendido =
+    (legacyRendRes.data ?? []).reduce((sum, r) => sum + r.amount, 0) +
+    (newRendRes.data ?? []).reduce((sum, r) => sum + r.amount, 0);
 
   const pendienteRendirRestaurante = totalAdeudado - totalRendido;
 

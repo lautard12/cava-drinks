@@ -1,6 +1,7 @@
 # Environment variables
 .env
 .env.*
+!.env.scripts.example
 
 # Logs
 logs
@@ -30,4 +31,9 @@ dist-ssr
 # Supabase CLI local state (no debe commitearse)
 supabase/.temp/
 supabase/.branches/
+
+# Excels con datos del cliente (no subir al repo)
+scripts/data/*.xlsx
+scripts/data/*.xls
+scripts/data/*.csv
 
