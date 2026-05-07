@@ -3,24 +3,29 @@ import { supabase } from "@/integrations/supabase/client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
-import { Volume2, VolumeX, Radio, ChevronDown, CheckCircle2, Clock } from "lucide-react";
+import { Volume2, VolumeX, Radio, ChevronDown, CheckCircle2, Clock, Play } from "lucide-react";
 import { format, startOfDay, subDays, subHours } from "date-fns";
 import { es } from "date-fns/locale";
 import { toast } from "sonner";
+
+type KitchenState = "PENDING" | "IN_PROGRESS" | "DELIVERED";
 
 interface KitchenItem {
   id: string;
   name_snapshot: string;
   qty: number;
   notes: string;
-  kitchen_state: string;
+  kitchen_state: KitchenState;
+  started_at: string | null;
+  delivered_at: string | null;
 }
 
 interface KitchenBatch {
   kitchen_batch_id: string;
   sent_at: string;
+  started_at: string | null;
   items: KitchenItem[];
-  all_delivered: boolean;
+  batch_state: KitchenState;
 }
 
 interface KitchenTable {
@@ -32,10 +37,37 @@ interface KitchenTable {
   has_pending: boolean;
 }
 
+type UndoEntry = { id: string; prevState: KitchenState };
+
 const PAGE_SIZE = 30;
 
 function shortId(uuid: string) {
   return uuid.slice(-6).toUpperCase();
+}
+
+function deriveBatchState(items: KitchenItem[]): KitchenState {
+  if (items.every((i) => i.kitchen_state === "DELIVERED")) return "DELIVERED";
+  if (items.some((i) => i.kitchen_state === "IN_PROGRESS" || i.kitchen_state === "DELIVERED")) return "IN_PROGRESS";
+  return "PENDING";
+}
+
+function minStartedAt(items: KitchenItem[]): string | null {
+  let min: string | null = null;
+  for (const i of items) {
+    if (!i.started_at) continue;
+    if (!min || i.started_at < min) min = i.started_at;
+  }
+  return min;
+}
+
+function relMin(from: string | null): string {
+  if (!from) return "";
+  const min = Math.floor((Date.now() - new Date(from).getTime()) / 60000);
+  if (min < 1) return "ahora";
+  if (min < 60) return `hace ${min} min`;
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return m === 0 ? `hace ${h}h` : `hace ${h}h ${m}min`;
 }
 
 export default function Cocina() {
@@ -46,6 +78,9 @@ export default function Cocina() {
   const [loading, setLoading] = useState(true);
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const knownBatchIds = useRef<Set<string>>(new Set());
+  const tablesRef = useRef<KitchenTable[]>([]);
+
+  useEffect(() => { tablesRef.current = tables; }, [tables]);
 
   const playBeep = useCallback(() => {
     if (!soundEnabled) return;
@@ -62,7 +97,75 @@ export default function Cocina() {
     } catch { /* ignore */ }
   }, [soundEnabled]);
 
+  // Patch optimista: aplica una funcion de transformacion a cada item, y recalcula batch_state + has_pending.
+  const patchTables = useCallback((transform: (item: KitchenItem) => KitchenItem) => {
+    setTables((prev) =>
+      prev.map((t) => {
+        const newBatches = t.batches.map((b) => {
+          const newItems = b.items.map(transform);
+          return {
+            ...b,
+            items: newItems,
+            batch_state: deriveBatchState(newItems),
+            started_at: minStartedAt(newItems),
+          };
+        });
+        return {
+          ...t,
+          batches: newBatches,
+          has_pending: newBatches.some((b) => b.batch_state !== "DELIVERED"),
+        };
+      })
+    );
+  }, []);
+
+  const undoDelivery = useCallback(async (snapshot: UndoEntry[]) => {
+    if (snapshot.length === 0) return;
+    // Patch optimista primero (UI snappy)
+    const byIdPrev = new Map(snapshot.map((e) => [e.id, e.prevState]));
+    patchTables((item) =>
+      byIdPrev.has(item.id)
+        ? { ...item, kitchen_state: byIdPrev.get(item.id)!, delivered_at: null }
+        : item
+    );
+    // Agrupar por prevState para minimizar round-trips
+    const byState = new Map<KitchenState, string[]>();
+    for (const e of snapshot) {
+      if (!byState.has(e.prevState)) byState.set(e.prevState, []);
+      byState.get(e.prevState)!.push(e.id);
+    }
+    for (const [state, ids] of byState) {
+      const { error } = await supabase
+        .from("pos_sale_items")
+        .update({ kitchen_state: state, delivered_at: null })
+        .in("id", ids);
+      if (error) {
+        toast.error("Error al deshacer");
+        return;
+      }
+    }
+  }, [patchTables]);
+
+  const showUndoToast = useCallback((snapshot: UndoEntry[]) => {
+    if (snapshot.length === 0) return;
+    toast.success("Entregado", {
+      duration: 5000,
+      action: {
+        label: "Deshacer",
+        onClick: () => undoDelivery(snapshot),
+      },
+    });
+  }, [undoDelivery]);
+
   const markItemDelivered = useCallback(async (itemId: string) => {
+    // Snapshot del estado previo
+    let prevState: KitchenState = "PENDING";
+    for (const t of tablesRef.current) {
+      for (const b of t.batches) {
+        const it = b.items.find((i) => i.id === itemId);
+        if (it) { prevState = it.kitchen_state; break; }
+      }
+    }
     const { error } = await supabase
       .from("pos_sale_items")
       .update({ kitchen_state: "DELIVERED", delivered_at: new Date().toISOString() })
@@ -71,50 +174,79 @@ export default function Cocina() {
       toast.error("Error al marcar como entregado");
       return;
     }
-    setTables((prev) =>
-      prev.map((t) => ({
-        ...t,
-        batches: t.batches.map((b) => ({
-          ...b,
-          items: b.items.map((i) =>
-            i.id === itemId ? { ...i, kitchen_state: "DELIVERED" } : i
-          ),
-          all_delivered: b.items.every((i) =>
-            i.id === itemId ? true : i.kitchen_state === "DELIVERED"
-          ),
-        })),
-      })).map((t) => ({
-        ...t,
-        has_pending: t.batches.some((b) => !b.all_delivered || b.items.some((i) => (i.id === itemId ? false : i.kitchen_state === "PENDING"))),
-      }))
+    patchTables((item) =>
+      item.id === itemId
+        ? { ...item, kitchen_state: "DELIVERED" as KitchenState, delivered_at: new Date().toISOString() }
+        : item
     );
-  }, []);
+    showUndoToast([{ id: itemId, prevState }]);
+  }, [patchTables, showUndoToast]);
 
   const markBatchDelivered = useCallback(async (saleId: string, batchId: string) => {
+    // Snapshot: solo items del batch que NO estan ya DELIVERED.
+    const snapshot: UndoEntry[] = [];
+    for (const t of tablesRef.current) {
+      if (t.sale_id !== saleId) continue;
+      const batch = t.batches.find((b) => b.kitchen_batch_id === batchId);
+      if (!batch) break;
+      for (const it of batch.items) {
+        if (it.kitchen_state !== "DELIVERED") {
+          snapshot.push({ id: it.id, prevState: it.kitchen_state });
+        }
+      }
+      break;
+    }
+    if (snapshot.length === 0) return;
+
+    const nowIso = new Date().toISOString();
     const { error } = await supabase
       .from("pos_sale_items")
-      .update({ kitchen_state: "DELIVERED", delivered_at: new Date().toISOString() })
+      .update({ kitchen_state: "DELIVERED", delivered_at: nowIso })
       .eq("sale_id", saleId)
-      .eq("kitchen_batch_id", batchId);
+      .eq("kitchen_batch_id", batchId)
+      .neq("kitchen_state", "DELIVERED");
     if (error) {
       toast.error("Error al marcar comanda como entregada");
       return;
     }
-    setTables((prev) =>
-      prev.map((t) => {
-        if (t.sale_id !== saleId) return t;
-        return {
-          ...t,
-          batches: t.batches.map((b) =>
-            b.kitchen_batch_id === batchId
-              ? { ...b, all_delivered: true, items: b.items.map((i) => ({ ...i, kitchen_state: "DELIVERED" })) }
-              : b
-          ),
-          has_pending: t.batches.some((b) => b.kitchen_batch_id !== batchId && !b.all_delivered),
-        };
-      })
+    const idsToFlip = new Set(snapshot.map((e) => e.id));
+    patchTables((item) =>
+      idsToFlip.has(item.id)
+        ? { ...item, kitchen_state: "DELIVERED" as KitchenState, delivered_at: nowIso }
+        : item
     );
-  }, []);
+    showUndoToast(snapshot);
+  }, [patchTables, showUndoToast]);
+
+  const startBatch = useCallback(async (saleId: string, batchId: string) => {
+    const nowIso = new Date().toISOString();
+    const { error } = await supabase
+      .from("pos_sale_items")
+      .update({ kitchen_state: "IN_PROGRESS", started_at: nowIso })
+      .eq("sale_id", saleId)
+      .eq("kitchen_batch_id", batchId)
+      .eq("kitchen_state", "PENDING");
+    if (error) {
+      toast.error("Error al iniciar preparación");
+      return;
+    }
+    // IDs del batch que estaban PENDING
+    const flipIds = new Set<string>();
+    for (const t of tablesRef.current) {
+      if (t.sale_id !== saleId) continue;
+      const batch = t.batches.find((b) => b.kitchen_batch_id === batchId);
+      if (!batch) break;
+      for (const it of batch.items) {
+        if (it.kitchen_state === "PENDING") flipIds.add(it.id);
+      }
+      break;
+    }
+    patchTables((item) =>
+      flipIds.has(item.id)
+        ? { ...item, kitchen_state: "IN_PROGRESS" as KitchenState, started_at: nowIso }
+        : item
+    );
+  }, [patchTables]);
 
   const fetchData = useCallback(async () => {
     const now = new Date();
@@ -126,7 +258,7 @@ export default function Cocina() {
 
     const { data: items, error: ie } = await supabase
       .from("pos_sale_items")
-      .select("id, sale_id, name_snapshot, qty, notes, sent_at, kitchen_batch_id, kitchen_state")
+      .select("id, sale_id, name_snapshot, qty, notes, sent_at, kitchen_batch_id, kitchen_state, started_at, delivered_at")
       .eq("owner", "RESTAURANTE")
       .eq("sent_to_kitchen", true)
       .gte("sent_at", from)
@@ -168,29 +300,35 @@ export default function Cocina() {
         tableMap[it.sale_id].batchMap[batchId] = { items: [], sentAt: it.sent_at ?? "" };
       }
       const batch = tableMap[it.sale_id].batchMap[batchId];
+      const rawState = (it.kitchen_state ?? "PENDING") as KitchenState;
       batch.items.push({
         id: it.id,
         name_snapshot: it.name_snapshot,
         qty: it.qty,
         notes: it.notes,
-        kitchen_state: it.kitchen_state ?? "PENDING",
+        kitchen_state: rawState === "PENDING" || rawState === "IN_PROGRESS" || rawState === "DELIVERED" ? rawState : "PENDING",
+        started_at: it.started_at ?? null,
+        delivered_at: it.delivered_at ?? null,
       });
       if (it.sent_at && (!batch.sentAt || it.sent_at < batch.sentAt)) {
         batch.sentAt = it.sent_at;
       }
     }
 
+    const stateOrder: Record<KitchenState, number> = { PENDING: 0, IN_PROGRESS: 1, DELIVERED: 2 };
+
     const result: KitchenTable[] = Object.entries(tableMap).map(([saleId, { sale, batchMap }]) => {
       const batches: KitchenBatch[] = Object.entries(batchMap)
         .map(([batchId, val]) => ({
           kitchen_batch_id: batchId,
           sent_at: val.sentAt,
+          started_at: minStartedAt(val.items),
           items: val.items,
-          all_delivered: val.items.every((i) => i.kitchen_state === "DELIVERED"),
+          batch_state: deriveBatchState(val.items),
         }))
-        // Newest batches first, pending before delivered
+        // Newest batches first, sorted by state priority (PENDING -> IN_PROGRESS -> DELIVERED)
         .sort((a, b) => {
-          if (a.all_delivered !== b.all_delivered) return a.all_delivered ? 1 : -1;
+          if (a.batch_state !== b.batch_state) return stateOrder[a.batch_state] - stateOrder[b.batch_state];
           return new Date(b.sent_at).getTime() - new Date(a.sent_at).getTime();
         });
 
@@ -200,7 +338,7 @@ export default function Cocina() {
         channel: sale.channel,
         sale_status: sale.status,
         batches,
-        has_pending: batches.some((b) => !b.all_delivered),
+        has_pending: batches.some((b) => b.batch_state !== "DELIVERED"),
       };
     })
     // Priority sort: 1) pending, 2) all delivered but open, 3) closed
@@ -240,6 +378,24 @@ export default function Cocina() {
       .on("postgres_changes", { event: "*", schema: "public", table: "pos_sale_items" }, async (payload) => {
         const item = payload.new as any;
         if (!item?.sent_to_kitchen || item?.owner !== "RESTAURANTE") return;
+        // Guard: si el UPDATE coincide con lo que ya tenemos local (probablemente nuestro propio echo),
+        // skip para no re-fetchear toda la tabla.
+        if (payload.eventType === "UPDATE" && item?.id) {
+          let local: KitchenItem | undefined;
+          for (const t of tablesRef.current) {
+            for (const b of t.batches) {
+              const found = b.items.find((i) => i.id === item.id);
+              if (found) { local = found; break; }
+            }
+            if (local) break;
+          }
+          if (local
+            && local.kitchen_state === item.kitchen_state
+            && (local.delivered_at ?? null) === (item.delivered_at ?? null)
+            && (local.started_at ?? null) === (item.started_at ?? null)) {
+            return;
+          }
+        }
         await fetchData();
       })
       .on("postgres_changes", { event: "UPDATE", schema: "public", table: "pos_sales" }, async (payload) => {
@@ -383,42 +539,72 @@ export default function Cocina() {
                       </div>
                     </CardHeader>
                     <CardContent className="pt-0 space-y-3 px-3 sm:px-6 pb-3 sm:pb-6">
-                      {table.batches.map((batch, bIdx) => {
-                        const time = batch.sent_at ? format(new Date(batch.sent_at), "HH:mm", { locale: es }) : "";
-                        const isNewBatch = !batch.all_delivered && Date.now() - new Date(batch.sent_at).getTime() < 5 * 60 * 1000;
+                      {table.batches.map((batch) => {
+                        const sentTime = batch.sent_at ? format(new Date(batch.sent_at), "HH:mm", { locale: es }) : "";
+                        const isNewBatch = batch.batch_state === "PENDING" && Date.now() - new Date(batch.sent_at).getTime() < 5 * 60 * 1000;
+
+                        const batchClass = batch.batch_state === "DELIVERED"
+                          ? "bg-muted/40 border-dashed opacity-60"
+                          : batch.batch_state === "IN_PROGRESS"
+                            ? "bg-blue-50/60 border-blue-300"
+                            : isNewBatch
+                              ? "bg-primary/5 border-primary/30 ring-1 ring-primary/20"
+                              : "bg-background";
+
+                        const timerColor = batch.batch_state === "PENDING"
+                          ? "text-amber-700 font-semibold"
+                          : batch.batch_state === "IN_PROGRESS"
+                            ? "text-blue-700 font-semibold"
+                            : "text-muted-foreground";
 
                         return (
                           <div
                             key={batch.kitchen_batch_id}
-                            className={`rounded-md border p-2.5 space-y-1.5 ${
-                              batch.all_delivered
-                                ? "bg-muted/40 border-dashed opacity-60"
-                                : isNewBatch
-                                ? "bg-primary/5 border-primary/30 ring-1 ring-primary/20"
-                                : "bg-background"
-                            }`}
+                            className={`rounded-md border p-2.5 space-y-1.5 ${batchClass}`}
                           >
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                                <Clock className="h-3 w-3" />
-                                <span>{time}</span>
+                            <div className="flex items-center justify-between gap-2 flex-wrap">
+                              <div className="flex items-center gap-1.5 text-xs flex-wrap">
+                                <Clock className="h-3 w-3 text-muted-foreground" />
+                                {batch.batch_state === "DELIVERED" ? (
+                                  <span className="text-muted-foreground">{sentTime}</span>
+                                ) : batch.batch_state === "IN_PROGRESS" ? (
+                                  <>
+                                    <span className={timerColor}>{relMin(batch.started_at)}</span>
+                                    <span className="text-muted-foreground text-[10px]">(entró {sentTime})</span>
+                                  </>
+                                ) : (
+                                  <span className={timerColor}>{relMin(batch.sent_at)}</span>
+                                )}
                                 {isNewBatch && (
                                   <Badge className="bg-primary text-primary-foreground text-[10px] px-1.5 py-0 ml-1">
                                     NUEVO
                                   </Badge>
                                 )}
                               </div>
-                              {!batch.all_delivered && (
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  className="h-8 sm:h-7 text-xs text-emerald-700 border-emerald-300 hover:bg-emerald-50 px-3"
-                                  onClick={() => markBatchDelivered(table.sale_id, batch.kitchen_batch_id)}
-                                >
-                                  <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
-                                  Todo
-                                </Button>
-                              )}
+                              <div className="flex items-center gap-1.5">
+                                {batch.batch_state === "PENDING" && (
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-8 sm:h-7 text-xs text-blue-700 border-blue-300 hover:bg-blue-50 px-3"
+                                    onClick={() => startBatch(table.sale_id, batch.kitchen_batch_id)}
+                                  >
+                                    <Play className="h-3.5 w-3.5 mr-1" />
+                                    Empezar
+                                  </Button>
+                                )}
+                                {batch.batch_state !== "DELIVERED" && (
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-8 sm:h-7 text-xs text-emerald-700 border-emerald-300 hover:bg-emerald-50 px-3"
+                                    onClick={() => markBatchDelivered(table.sale_id, batch.kitchen_batch_id)}
+                                  >
+                                    <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
+                                    Todo
+                                  </Button>
+                                )}
+                              </div>
                             </div>
 
                             {batch.items.map((item) => {
@@ -430,7 +616,11 @@ export default function Cocina() {
                                       {item.qty}x {item.name_snapshot}
                                     </p>
                                     {item.notes && (
-                                      <p className="text-xs text-muted-foreground italic ml-5 break-words whitespace-pre-wrap">{item.notes}</p>
+                                      <div className={`mt-1 mb-1 rounded border border-red-300 bg-red-50 px-2 py-1 ${done ? "opacity-50" : ""}`}>
+                                        <p className="text-xs font-bold text-red-900 break-words whitespace-pre-wrap">
+                                          {item.notes}
+                                        </p>
+                                      </div>
                                     )}
                                   </div>
                                   {!done && (

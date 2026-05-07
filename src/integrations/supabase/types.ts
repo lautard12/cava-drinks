@@ -12,6 +12,31 @@ export type Database = {
   __InternalSupabase: {
     PostgrestVersion: "14.5"
   }
+  graphql_public: {
+    Tables: {
+      [_ in never]: never
+    }
+    Views: {
+      [_ in never]: never
+    }
+    Functions: {
+      graphql: {
+        Args: {
+          extensions?: Json
+          operationName?: string
+          query?: string
+          variables?: Json
+        }
+        Returns: Json
+      }
+    }
+    Enums: {
+      [_ in never]: never
+    }
+    CompositeTypes: {
+      [_ in never]: never
+    }
+  }
   public: {
     Tables: {
       cash_counts: {
@@ -473,6 +498,7 @@ export type Database = {
           sale_id: string
           sent_at: string | null
           sent_to_kitchen: boolean | null
+          started_at: string | null
           unit_price: number
           unit_price_base_snapshot: number
           variant_snapshot: string
@@ -498,6 +524,7 @@ export type Database = {
           sale_id: string
           sent_at?: string | null
           sent_to_kitchen?: boolean | null
+          started_at?: string | null
           unit_price: number
           unit_price_base_snapshot?: number
           variant_snapshot?: string
@@ -523,6 +550,7 @@ export type Database = {
           sale_id?: string
           sent_at?: string | null
           sent_to_kitchen?: boolean | null
+          started_at?: string | null
           unit_price?: number
           unit_price_base_snapshot?: number
           variant_snapshot?: string
@@ -871,6 +899,39 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      restaurant_settlements: {
+        Row: {
+          amount: number
+          created_at: string
+          created_by: string
+          date: string
+          deleted_at: string | null
+          fund: string
+          id: string
+          notes: string | null
+        }
+        Insert: {
+          amount: number
+          created_at?: string
+          created_by?: string
+          date: string
+          deleted_at?: string | null
+          fund: string
+          id?: string
+          notes?: string | null
+        }
+        Update: {
+          amount?: number
+          created_at?: string
+          created_by?: string
+          date?: string
+          deleted_at?: string | null
+          fund?: string
+          id?: string
+          notes?: string | null
+        }
+        Relationships: []
       }
       stock_balances: {
         Row: {
@@ -1377,6 +1438,9 @@ export type CompositeTypes<
     : never
 
 export const Constants = {
+  graphql_public: {
+    Enums: {},
+  },
   public: {
     Enums: {
       app_role: ["admin", "cajero", "cocina"],
