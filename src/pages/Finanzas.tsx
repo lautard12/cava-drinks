@@ -52,6 +52,7 @@ import {
   type RestaurantSettlement,
 } from "@/lib/restaurant-settlement-store";
 import { SettlementModal } from "@/components/finanzas/SettlementModal";
+import { SettlementReceiptModal } from "@/components/finanzas/SettlementReceiptModal";
 
 const fmt = (n: number) => `$${n.toLocaleString("es-AR")}`;
 
@@ -151,6 +152,7 @@ export default function Finanzas() {
 
   const [showSettlementModal, setShowSettlementModal] = useState(false);
   const [settlementToDelete, setSettlementToDelete] = useState<RestaurantSettlement | null>(null);
+  const [settlementReceipt, setSettlementReceipt] = useState<RestaurantSettlement | null>(null);
 
   const settlementsQ = useQuery({
     queryKey: ["finanzas-settlements", from, to],
@@ -531,22 +533,35 @@ export default function Finanzas() {
                   <TableHeader>
                     <TableRow>
                       <TableHead>Fecha</TableHead>
+                      <TableHead>Período</TableHead>
                       <TableHead>Fondo</TableHead>
                       <TableHead>Notas</TableHead>
                       <TableHead className="text-right">Monto</TableHead>
-                      <TableHead className="w-10" />
+                      <TableHead className="w-32 text-right">Acciones</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {(settlementsQ.data ?? []).map((s) => (
                       <TableRow key={s.id}>
                         <TableCell>{format(new Date(s.date + "T12:00:00"), "dd/MM/yyyy")}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground">
+                          {s.period_from && s.period_to
+                            ? `${format(new Date(s.period_from + "T12:00:00"), "dd/MM")} → ${format(new Date(s.period_to + "T12:00:00"), "dd/MM/yyyy")}`
+                            : "—"}
+                        </TableCell>
                         <TableCell>
                           <Badge variant="outline">{s.fund === "EFECTIVO" ? "Efectivo" : "MercadoPago"}</Badge>
                         </TableCell>
                         <TableCell className="text-muted-foreground text-sm">{s.notes ?? "—"}</TableCell>
                         <TableCell className="text-right font-medium tabular-nums">{fmt(s.amount)}</TableCell>
-                        <TableCell>
+                        <TableCell className="flex items-center gap-1 justify-end">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setSettlementReceipt(s)}
+                          >
+                            <Receipt className="h-3.5 w-3.5 mr-1" /> Recibo
+                          </Button>
                           <Button
                             size="icon"
                             variant="ghost"
@@ -725,6 +740,12 @@ export default function Finanzas() {
         pendiente={capitalQ.data?.pendienteRendirRestaurante ?? 0}
         onClose={() => setShowSettlementModal(false)}
         onSaved={() => { invalidate(); setShowSettlementModal(false); }}
+      />
+
+      <SettlementReceiptModal
+        open={!!settlementReceipt}
+        onOpenChange={(v) => !v && setSettlementReceipt(null)}
+        settlement={settlementReceipt}
       />
 
       <AlertDialog

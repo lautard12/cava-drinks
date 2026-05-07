@@ -119,6 +119,160 @@ export default function Cocina() {
     );
   }, []);
 
+  // Mapea un payload crudo de Supabase a KitchenItem (subset de campos).
+  const rawToKitchenItem = (raw: Record<string, unknown>): KitchenItem => {
+    const rawState = (raw.kitchen_state ?? "PENDING") as KitchenState;
+    return {
+      id: raw.id as string,
+      name_snapshot: (raw.name_snapshot as string) ?? "",
+      qty: (raw.qty as number) ?? 0,
+      notes: (raw.notes as string) ?? "",
+      kitchen_state: rawState === "PENDING" || rawState === "IN_PROGRESS" || rawState === "DELIVERED" ? rawState : "PENDING",
+      started_at: (raw.started_at as string | null) ?? null,
+      delivered_at: (raw.delivered_at as string | null) ?? null,
+    };
+  };
+
+  // Cache de fetches puntuales en vuelo, para deduplicar cuando llegan varios INSERT en paralelo
+  // de items de una misma sale "nueva" (sino N eventos disparan N queries identicas).
+  const inflightSaleFetches = useRef<Map<string, Promise<{ id: string; channel: string; status: string; tab_name: string | null } | null>>>(new Map());
+
+  const fetchSaleOnce = useCallback((saleId: string) => {
+    const existing = inflightSaleFetches.current.get(saleId);
+    if (existing) return existing;
+    const p = (async () => {
+      try {
+        const { data, error } = await supabase
+          .from("pos_sales")
+          .select("id, channel, status, tab_name")
+          .eq("id", saleId)
+          .single();
+        if (error || !data) return null;
+        return data as { id: string; channel: string; status: string; tab_name: string | null };
+      } finally {
+        // Mantener el cache solo el tiempo necesario para deduplicar la rafaga
+        setTimeout(() => inflightSaleFetches.current.delete(saleId), 1000);
+      }
+    })();
+    inflightSaleFetches.current.set(saleId, p);
+    return p;
+  }, []);
+
+  // INSERT/UPDATE de un item: agrega a batch existente o crea batch nuevo. Si la sale no existe en el state,
+  // hace fetch puntual de la sale y agrega la fila completa.
+  const applyItemUpsert = useCallback(async (raw: Record<string, unknown>) => {
+    const saleId = raw.sale_id as string;
+    const batchId = (raw.kitchen_batch_id as string) ?? "legacy";
+    const sentAt = (raw.sent_at as string) ?? "";
+    const newItem = rawToKitchenItem(raw);
+
+    // Pre-fetch de la sale solo si no la tenemos. La decision crear/mergear se toma adentro del
+    // setTables para evitar race conditions cuando dos INSERTs llegan casi simultaneos.
+    const saleExistsBefore = tablesRef.current.some((t) => t.sale_id === saleId);
+    const fetchedSale = saleExistsBefore ? null : await fetchSaleOnce(saleId);
+
+    let isNewTable = false;
+    let isNewBatch = false;
+
+    setTables((prev) => {
+      const existingTable = prev.find((t) => t.sale_id === saleId);
+      if (!existingTable) {
+        // Si no la tenemos cacheada y el fetch fallo, no podemos crearla.
+        if (!fetchedSale) return prev;
+        isNewTable = true;
+        isNewBatch = true;
+        const newBatch: KitchenBatch = {
+          kitchen_batch_id: batchId,
+          sent_at: sentAt,
+          started_at: newItem.started_at,
+          items: [newItem],
+          batch_state: deriveBatchState([newItem]),
+        };
+        const newTable: KitchenTable = {
+          sale_id: fetchedSale.id,
+          tab_name: fetchedSale.tab_name,
+          channel: fetchedSale.channel,
+          sale_status: fetchedSale.status,
+          batches: [newBatch],
+          has_pending: newBatch.batch_state !== "DELIVERED",
+        };
+        return [newTable, ...prev];
+      }
+
+      // Mergear sobre la table existente
+      return prev.map((t) => {
+        if (t.sale_id !== saleId) return t;
+        const existingBatch = t.batches.find((b) => b.kitchen_batch_id === batchId);
+        let newBatches: KitchenBatch[];
+        if (existingBatch) {
+          newBatches = t.batches.map((b) => {
+            if (b.kitchen_batch_id !== batchId) return b;
+            const existingItem = b.items.find((i) => i.id === newItem.id);
+            const newItems = existingItem
+              ? b.items.map((i) => (i.id === newItem.id ? newItem : i))
+              : [...b.items, newItem];
+            return {
+              ...b,
+              items: newItems,
+              batch_state: deriveBatchState(newItems),
+              started_at: minStartedAt(newItems),
+              sent_at: b.sent_at && (!sentAt || b.sent_at < sentAt) ? b.sent_at : sentAt,
+            };
+          });
+        } else {
+          isNewBatch = true;
+          newBatches = [
+            {
+              kitchen_batch_id: batchId,
+              sent_at: sentAt,
+              started_at: newItem.started_at,
+              items: [newItem],
+              batch_state: deriveBatchState([newItem]),
+            },
+            ...t.batches,
+          ];
+        }
+        return {
+          ...t,
+          batches: newBatches,
+          has_pending: newBatches.some((b) => b.batch_state !== "DELIVERED"),
+        };
+      });
+    });
+
+    if (isNewBatch) {
+      knownBatchIds.current.add(`${saleId}::${batchId}`);
+      if (isNewTable || isNewBatch) playBeep();
+    }
+  }, [fetchSaleOnce, playBeep]);
+
+  // DELETE de un item: lo quita; si el batch queda vacio lo quita; si la sale queda sin batches la quita.
+  const applyItemDelete = useCallback((itemId: string) => {
+    setTables((prev) =>
+      prev
+        .map((t) => {
+          const newBatches = t.batches
+            .map((b) => {
+              const newItems = b.items.filter((i) => i.id !== itemId);
+              if (newItems.length === b.items.length) return b;
+              return {
+                ...b,
+                items: newItems,
+                batch_state: deriveBatchState(newItems),
+                started_at: minStartedAt(newItems),
+              };
+            })
+            .filter((b) => b.items.length > 0);
+          return {
+            ...t,
+            batches: newBatches,
+            has_pending: newBatches.some((b) => b.batch_state !== "DELIVERED"),
+          };
+        })
+        .filter((t) => t.batches.length > 0)
+    );
+  }, []);
+
   const undoDelivery = useCallback(async (snapshot: UndoEntry[]) => {
     if (snapshot.length === 0) return;
     // Patch optimista primero (UI snappy)
@@ -279,11 +433,12 @@ export default function Cocina() {
 
     if (se) { setLoading(false); return; }
 
-    const saleMap: Record<string, any> = {};
-    for (const s of sales ?? []) saleMap[s.id] = s;
+    type SaleRow = { id: string; channel: string; status: string; tab_name: string | null };
+    const saleMap: Record<string, SaleRow> = {};
+    for (const s of sales ?? []) saleMap[s.id] = s as SaleRow;
 
     // Group by sale_id -> batches
-    const tableMap: Record<string, { sale: any; batchMap: Record<string, { items: KitchenItem[]; sentAt: string }> }> = {};
+    const tableMap: Record<string, { sale: SaleRow; batchMap: Record<string, { items: KitchenItem[]; sentAt: string }> }> = {};
     const allBatchKeys = new Set<string>();
 
     for (const it of items) {
@@ -375,38 +530,40 @@ export default function Cocina() {
   useEffect(() => {
     const channel = supabase
       .channel("kitchen-tables")
-      .on("postgres_changes", { event: "*", schema: "public", table: "pos_sale_items" }, async (payload) => {
-        const item = payload.new as any;
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "pos_sale_items" }, async (payload) => {
+        const item = payload.new as Record<string, unknown>;
         if (!item?.sent_to_kitchen || item?.owner !== "RESTAURANTE") return;
-        // Guard: si el UPDATE coincide con lo que ya tenemos local (probablemente nuestro propio echo),
-        // skip para no re-fetchear toda la tabla.
-        if (payload.eventType === "UPDATE" && item?.id) {
-          let local: KitchenItem | undefined;
-          for (const t of tablesRef.current) {
-            for (const b of t.batches) {
-              const found = b.items.find((i) => i.id === item.id);
-              if (found) { local = found; break; }
-            }
-            if (local) break;
+        await applyItemUpsert(item);
+      })
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "pos_sale_items" }, async (payload) => {
+        const item = payload.new as Record<string, unknown>;
+        const oldItem = payload.old as Record<string, unknown> | null;
+        // Caso: un item paso de NO enviado a enviado (cajero toca "Enviar a cocina").
+        // El UPDATE viene como UPDATE pero para nosotros es un alta logica.
+        if (!item?.sent_to_kitchen || item?.owner !== "RESTAURANTE") {
+          // Si el item antes estaba en cocina y ahora no (caso raro), tratarlo como delete.
+          if (oldItem?.sent_to_kitchen && oldItem?.owner === "RESTAURANTE" && oldItem?.id) {
+            applyItemDelete(oldItem.id as string);
           }
-          if (local
-            && local.kitchen_state === item.kitchen_state
-            && (local.delivered_at ?? null) === (item.delivered_at ?? null)
-            && (local.started_at ?? null) === (item.started_at ?? null)) {
-            return;
-          }
+          return;
         }
-        await fetchData();
+        await applyItemUpsert(item);
+      })
+      .on("postgres_changes", { event: "DELETE", schema: "public", table: "pos_sale_items" }, (payload) => {
+        const oldItem = payload.old as Record<string, unknown> | null;
+        if (!oldItem?.id) return;
+        applyItemDelete(oldItem.id as string);
       })
       .on("postgres_changes", { event: "UPDATE", schema: "public", table: "pos_sales" }, async (payload) => {
-        const sale = payload.new as any;
+        // El cambio de status afecta priorizacion global del listado, mas barato refetch que rebuildear estado.
+        const sale = payload.new as Record<string, unknown>;
         if (sale?.status === "COMPLETED" || sale?.status === "CANCELLED") {
           await fetchData();
         }
       })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
-  }, [fetchData]);
+  }, [applyItemUpsert, applyItemDelete, fetchData]);
 
   useEffect(() => {
     const interval = setInterval(() => setTables((t) => [...t]), 60_000);
@@ -478,7 +635,7 @@ export default function Cocina() {
               variant={statusFilter === val ? "default" : "outline"}
               size="sm"
               className={`h-9 sm:h-8 text-xs px-3 shrink-0 ${statusFilter !== val ? textCls : ""}`}
-              onClick={() => setStatusFilter(val as any)}
+              onClick={() => setStatusFilter(val)}
             >
               {label}
             </Button>

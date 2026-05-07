@@ -21,7 +21,7 @@ import {
 } from "@/components/ui/select";
 import { AlertCircle } from "lucide-react";
 import type { Fund } from "@/lib/finanzas-store";
-import { createSettlement } from "@/lib/restaurant-settlement-store";
+import { createSettlement, fetchSuggestedPeriod } from "@/lib/restaurant-settlement-store";
 
 interface SettlementModalProps {
   open: boolean;
@@ -49,24 +49,42 @@ export function SettlementModal({
   const [fund, setFund] = useState<Fund>("EFECTIVO");
   const [amount, setAmount] = useState("");
   const [notes, setNotes] = useState("");
+  const [periodFrom, setPeriodFrom] = useState("");
+  const [periodTo, setPeriodTo] = useState(defaultDate);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (open) {
-      setDate(defaultDate);
-      setFund("EFECTIVO");
-      setAmount("");
-      setNotes("");
-    }
+    if (!open) return;
+    setDate(defaultDate);
+    setFund("EFECTIVO");
+    setAmount("");
+    setNotes("");
+    setPeriodTo(defaultDate);
+    // Sugerir período: desde el día siguiente a la última rendición hasta hoy.
+    fetchSuggestedPeriod()
+      .then(({ from, to }) => {
+        setPeriodFrom(from ?? "");
+        setPeriodTo(to);
+      })
+      .catch(() => {
+        setPeriodFrom("");
+      });
   }, [open, defaultDate]);
 
   const parsed = Number(amount.replace(",", "."));
   const validAmount = Number.isFinite(parsed) && parsed > 0;
   const excedePendiente = validAmount && parsed > pendiente;
 
+  const periodInvalid =
+    periodFrom !== "" && periodTo !== "" && periodFrom > periodTo;
+
   const handleSave = async () => {
     if (!validAmount) {
       toast.error("Ingresá un monto válido");
+      return;
+    }
+    if (periodInvalid) {
+      toast.error("El período es inválido (desde es mayor que hasta)");
       return;
     }
     setSaving(true);
@@ -76,6 +94,8 @@ export function SettlementModal({
         fund,
         amount: Math.round(parsed),
         notes,
+        period_from: periodFrom || null,
+        period_to: periodTo || null,
       });
       toast.success("Rendición registrada");
       onSaved();
@@ -117,6 +137,29 @@ export function SettlementModal({
             </Select>
           </div>
           <div>
+            <Label>Período cubierto</Label>
+            <div className="grid grid-cols-2 gap-2">
+              <Input
+                type="date"
+                value={periodFrom}
+                onChange={(e) => setPeriodFrom(e.target.value)}
+                placeholder="Desde"
+              />
+              <Input
+                type="date"
+                value={periodTo}
+                onChange={(e) => setPeriodTo(e.target.value)}
+                placeholder="Hasta"
+              />
+            </div>
+            <p className="text-xs text-muted-foreground mt-1">
+              El recibo va a mostrar el detalle de las ventas en este rango.
+            </p>
+            {periodInvalid && (
+              <p className="text-xs text-destructive mt-1">"Desde" no puede ser mayor que "hasta".</p>
+            )}
+          </div>
+          <div>
             <Label>Monto</Label>
             <Input
               type="number"
@@ -144,7 +187,7 @@ export function SettlementModal({
 
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={saving}>Cancelar</Button>
-          <Button onClick={handleSave} disabled={saving || !validAmount}>
+          <Button onClick={handleSave} disabled={saving || !validAmount || periodInvalid}>
             {saving ? "Guardando…" : "Registrar rendición"}
           </Button>
         </DialogFooter>
