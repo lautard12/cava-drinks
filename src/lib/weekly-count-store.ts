@@ -111,7 +111,6 @@ export async function createCount(startDate: string, endDate: string) {
       product_id: p.id,
       system_qty: sysQty,
       counted_qty: sysQty,
-      diff_qty: 0,
     };
   });
 
@@ -138,74 +137,32 @@ export async function fetchCountLines(countId: string) {
   }));
 }
 
-export async function saveDraft(countId: string, lines: { id: string; counted_qty: number | null }[]) {
-  for (const line of lines) {
-    const diff = line.counted_qty != null ? line.counted_qty - 0 : null; // will be recalculated
-    await supabase
-      .from("inventory_count_lines")
-      .update({ counted_qty: line.counted_qty })
-      .eq("id", line.id);
-  }
-  // Recalculate diff_qty from system_qty
-  const { data: updated } = await supabase
-    .from("inventory_count_lines")
-    .select("id, system_qty, counted_qty")
-    .eq("count_id", countId);
-  
-  for (const l of updated ?? []) {
-    const diff = l.counted_qty != null ? l.counted_qty - l.system_qty : null;
-    await supabase
-      .from("inventory_count_lines")
-      .update({ diff_qty: diff })
-      .eq("id", l.id);
-  }
+export type DraftLine = {
+  id: string;
+  counted_qty: number | null;
+  diff_reason?: string | null;
+  diff_note?: string | null;
+};
+
+export async function saveDraft(countId: string, lines: DraftLine[]) {
+  const payload = lines.map((l) => ({
+    id: l.id,
+    counted_qty: l.counted_qty != null ? String(l.counted_qty) : "",
+    diff_reason: l.diff_reason ?? "",
+    diff_note: l.diff_note ?? "",
+  }));
+  const { error } = await supabase.rpc("save_inventory_count_draft", {
+    p_count_id: countId,
+    p_lines: payload,
+  });
+  if (error) throw new Error(error.message);
 }
 
-export async function applyCountAdjustments(countId: string, startDate: string, endDate: string) {
-  const { data: lines, error } = await supabase
-    .from("inventory_count_lines")
-    .select("*")
-    .eq("count_id", countId)
-    .not("counted_qty", "is", null);
-  if (error) throw error;
-
-  const reason = `Conteo semanal ${startDate} a ${endDate}`;
-  const movements: any[] = [];
-  const balanceUpserts: any[] = [];
-
-  for (const l of lines ?? []) {
-    const diff = l.counted_qty! - l.system_qty;
-    if (diff !== 0) {
-      movements.push({
-        product_id: l.product_id,
-        type: "ADJUST",
-        qty: diff,
-        reason,
-      });
-    }
-    balanceUpserts.push({
-      product_id: l.product_id,
-      qty_on_hand: l.counted_qty!,
-    });
-  }
-
-  if (movements.length > 0) {
-    const { error: mErr } = await supabase.from("stock_movements").insert(movements);
-    if (mErr) throw mErr;
-  }
-
-  if (balanceUpserts.length > 0) {
-    const { error: bErr } = await supabase
-      .from("stock_balances")
-      .upsert(balanceUpserts, { onConflict: "product_id" });
-    if (bErr) throw bErr;
-  }
-
-  const { error: uErr } = await supabase
-    .from("inventory_counts")
-    .update({ status: "ADJUSTED", adjusted_at: new Date().toISOString() })
-    .eq("id", countId);
-  if (uErr) throw uErr;
+export async function applyCountAdjustments(countId: string) {
+  const { error } = await supabase.rpc("apply_inventory_count_atomic", {
+    p_count_id: countId,
+  });
+  if (error) throw new Error(error.message);
 }
 
 export async function closeCount(countId: string) {

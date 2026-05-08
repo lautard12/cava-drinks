@@ -37,6 +37,28 @@ const movementLabels: Record<MovementType, { label: string; className: string }>
   ADJUST: { label: 'Ajuste', className: 'bg-amber-100 text-amber-800 border-amber-200' },
 };
 
+const countReasonLabels: Record<string, string> = {
+  ROTURA: 'Rotura',
+  HURTO: 'Hurto',
+  ERROR_CARGA: 'Error de carga',
+  VENCIMIENTO: 'Vencimiento',
+  OTRO: 'Otro',
+};
+
+// Parsea reasons generados por apply_inventory_count_atomic.
+// Formato: "Conteo {start}..{end} | {REASON_CODE}[: {note}]"
+function parseCountReason(reason: string): { period: string; reasonLabel: string; note: string } | null {
+  if (!reason?.startsWith('Conteo ')) return null;
+  const m = reason.match(/^Conteo (\S+)\.\.(\S+) \| ([A-Z_]+)(?:: (.+))?$/);
+  if (!m) return null;
+  const [, start, end, code, note] = m;
+  return {
+    period: `${start} al ${end}`,
+    reasonLabel: countReasonLabels[code] ?? code,
+    note: note ?? '',
+  };
+}
+
 export function HistoryDrawer({ open, onClose, movements }: HistoryDrawerProps) {
   const [filterType, setFilterType] = useState<string>('all');
   const [search, setSearch] = useState('');
@@ -54,9 +76,17 @@ export function HistoryDrawer({ open, onClose, movements }: HistoryDrawerProps) 
     });
   }, [movements, filterType, search]);
 
+  // Convención: stock_movements.qty siempre se guarda absoluto. El signo visible
+  // depende del tipo: SALE y WASTE restan stock; PURCHASE suma; ADJUST puede ser
+  // ambos (se respeta el signo guardado, que viene de counted - system).
+  const displayQty = (m: StockMovement) => {
+    if (m.type === 'SALE' || m.type === 'WASTE') return -Math.abs(m.qty);
+    if (m.type === 'PURCHASE') return Math.abs(m.qty);
+    return m.qty;
+  };
   const formatQty = (m: StockMovement) => {
-    const prefix = m.qty > 0 ? '+' : '';
-    return `${prefix}${m.qty}`;
+    const q = displayQty(m);
+    return q > 0 ? `+${q}` : `${q}`;
   };
 
   return (
@@ -106,6 +136,7 @@ export function HistoryDrawer({ open, onClose, movements }: HistoryDrawerProps) 
               )}
               {filtered.map((m) => {
                 const config = movementLabels[m.type];
+                const parsed = m.type === 'ADJUST' ? parseCountReason(m.reason ?? '') : null;
                 return (
                   <TableRow key={m.id}>
                     <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
@@ -117,11 +148,22 @@ export function HistoryDrawer({ open, onClose, movements }: HistoryDrawerProps) 
                     <TableCell>
                       <Badge variant="outline" className={config.className}>{config.label}</Badge>
                     </TableCell>
-                    <TableCell className={`text-right font-mono font-semibold ${m.qty > 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                    <TableCell className={`text-right font-mono font-semibold ${displayQty(m) > 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                       {formatQty(m)}
                     </TableCell>
-                    <TableCell className="text-xs text-muted-foreground max-w-[120px] truncate">
-                      {m.reason}
+                    <TableCell className="text-xs max-w-[180px]">
+                      {parsed ? (
+                        <div className="flex flex-col gap-0.5">
+                          <Badge variant="outline" className="bg-slate-100 text-slate-700 border-slate-200 w-fit text-[10px] py-0">
+                            Conteo · {parsed.reasonLabel}
+                          </Badge>
+                          <span className="text-muted-foreground truncate">
+                            {parsed.note ? parsed.note : parsed.period}
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="text-muted-foreground truncate block">{m.reason}</span>
+                      )}
                     </TableCell>
                   </TableRow>
                 );

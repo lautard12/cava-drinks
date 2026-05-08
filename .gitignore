@@ -37,3 +37,7 @@ scripts/data/*.xlsx
 scripts/data/*.xls
 scripts/data/*.csv
 
+# Claude Code agents/skills locales
+.agents/
+skills-lock.json
+

@@ -1,8 +1,8 @@
-import { useState, useMemo } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { format, subDays } from "date-fns";
 import { es } from "date-fns/locale";
-import { CalendarIcon, Search, CheckCircle2, AlertTriangle, Save, Eye, Play, ClipboardCheck, ArrowLeft } from "lucide-react";
+import { CalendarIcon, Search, CheckCircle2, Save, Eye, Play, ClipboardCheck, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -14,7 +14,6 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Calendar } from "@/components/ui/calendar";
 import { cn } from "@/lib/utils";
 import { toast } from "@/hooks/use-toast";
-import { ProductType } from "@/lib/types";
 import { fetchCategories } from "@/lib/supabase-store";
 import {
   fetchSalesByDay,
@@ -68,10 +67,10 @@ export function WeeklyCountMode() {
 
   // Count inputs
   const [countInputs, setCountInputs] = useState<Record<string, string>>({});
+  const [reasonInputs, setReasonInputs] = useState<Record<string, { reason: string; note: string }>>({});
   const [previewDiffs, setPreviewDiffs] = useState<any[] | null>(null);
   const [saving, setSaving] = useState(false);
   const [applying, setApplying] = useState(false);
-  const [inputsInitialized, setInputsInitialized] = useState(false);
 
   const { data: categories = [] } = useQuery({ queryKey: ["categories"], queryFn: fetchCategories });
 
@@ -140,31 +139,51 @@ export function WeeklyCountMode() {
     try {
       await createCount(startStr, endStr);
       refetchCount();
+      queryClient.invalidateQueries({ queryKey: ["all-counts"] });
       toast({ title: "Conteo creado" });
     } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
+      const msg = String(e?.message ?? "");
+      const isOneActive = msg.includes("inventory_counts_one_active");
+      toast({
+        title: "Error",
+        description: isOneActive
+          ? "Ya existe un conteo activo (en borrador o ajustado). Cerralo antes de crear uno nuevo."
+          : msg,
+        variant: "destructive",
+      });
     }
   };
 
-  // Initialize inputs from existing lines (use useEffect to avoid render-cycle setState)
-  // Reset inputsInitialized when range changes
-  if (countLines.length > 0 && !inputsInitialized) {
+  // Inicializar inputs desde las líneas persistidas cada vez que cambia el conteo cargado.
+  useEffect(() => {
     const inputs: Record<string, string> = {};
-    for (const l of countLines) {
+    const reasons: Record<string, { reason: string; note: string }> = {};
+    for (const l of countLines as any[]) {
       if (l.counted_qty != null) inputs[l.id] = String(l.counted_qty);
+      reasons[l.id] = { reason: l.diff_reason ?? "", note: l.diff_note ?? "" };
     }
     setCountInputs(inputs);
-    setInputsInitialized(true);
-  }
+    setReasonInputs(reasons);
+  }, [countLines]);
+
+  const buildLinesPayload = () =>
+    countLines.map((l: any) => {
+      const raw = countInputs[l.id];
+      const counted = raw !== undefined && raw !== "" ? parseInt(raw) : null;
+      const diff = counted != null ? counted - l.system_qty : null;
+      const r = reasonInputs[l.id];
+      return {
+        id: l.id,
+        counted_qty: counted,
+        diff_reason: diff !== null && diff !== 0 ? r?.reason || null : null,
+        diff_note: diff !== null && diff !== 0 ? r?.note || null : null,
+      };
+    });
 
   const handleSaveDraft = async () => {
     setSaving(true);
     try {
-      const linesToSave = countLines.map((l: any) => ({
-        id: l.id,
-        counted_qty: countInputs[l.id] !== undefined && countInputs[l.id] !== "" ? parseInt(countInputs[l.id]) : null,
-      }));
-      await saveDraft(countRecord!.id, linesToSave);
+      await saveDraft(countRecord!.id, buildLinesPayload());
       await refetchLines();
       toast({ title: "Borrador guardado" });
     } catch (e: any) {
@@ -179,22 +198,35 @@ export function WeeklyCountMode() {
       .map((l: any) => {
         const counted = parseInt(countInputs[l.id]);
         const diff = counted - l.system_qty;
-        return { ...l, counted_qty: counted, diff_qty: diff };
+        const r = reasonInputs[l.id];
+        return { ...l, counted_qty: counted, diff_qty: diff, diff_reason: r?.reason ?? "", diff_note: r?.note ?? "" };
       })
       .filter((l: any) => l.diff_qty !== 0);
     setPreviewDiffs(diffs);
   };
 
   const handleApply = async () => {
+    // Validar motivos para todas las líneas con diff != 0.
+    const missing = countLines.filter((l: any) => {
+      const raw = countInputs[l.id];
+      if (raw === undefined || raw === "") return false;
+      const diff = parseInt(raw) - l.system_qty;
+      if (diff === 0) return false;
+      return !reasonInputs[l.id]?.reason;
+    });
+    if (missing.length > 0) {
+      toast({
+        title: "Faltan motivos",
+        description: `${missing.length} producto(s) con diferencia sin motivo cargado.`,
+        variant: "destructive",
+      });
+      return;
+    }
+
     setApplying(true);
     try {
-      // Save draft first
-      const linesToSave = countLines.map((l: any) => ({
-        id: l.id,
-        counted_qty: countInputs[l.id] !== undefined && countInputs[l.id] !== "" ? parseInt(countInputs[l.id]) : null,
-      }));
-      await saveDraft(countRecord!.id, linesToSave);
-      await applyCountAdjustments(countRecord!.id, startStr, endStr);
+      await saveDraft(countRecord!.id, buildLinesPayload());
+      await applyCountAdjustments(countRecord!.id);
       await refetchCount();
       await refetchLines();
       queryClient.invalidateQueries({ queryKey: ["products-with-stock"] });
@@ -221,6 +253,7 @@ export function WeeklyCountMode() {
       await closeCount(countRecord!.id);
       await refetchCount();
       queryClient.invalidateQueries({ queryKey: ["last-closed-count"] });
+      queryClient.invalidateQueries({ queryKey: ["all-counts"] });
       toast({ title: "Período validado ✅" });
     } catch (e: any) {
       toast({ title: "Error", description: e.message, variant: "destructive" });
@@ -489,15 +522,18 @@ export function WeeklyCountMode() {
                       <TableHead className="text-center">Stock sistema</TableHead>
                       <TableHead className="text-center">Conteo real</TableHead>
                       <TableHead className="text-center">Diff</TableHead>
+                      <TableHead>Motivo</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {filteredCountLines.length === 0 && (
-                      <TableRow><TableCell colSpan={6} className="text-center text-muted-foreground py-4">Sin productos</TableCell></TableRow>
+                      <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground py-4">Sin productos</TableCell></TableRow>
                     )}
                     {filteredCountLines.map((l: any) => {
                       const val = countInputs[l.id] ?? "";
                       const diff = val !== "" ? parseInt(val) - l.system_qty : null;
+                      const r = reasonInputs[l.id] ?? { reason: "", note: "" };
+                      const showReason = diff != null && diff !== 0;
                       return (
                         <TableRow key={l.id}>
                           <TableCell>
@@ -526,6 +562,35 @@ export function WeeklyCountMode() {
                               </span>
                             )}
                           </TableCell>
+                          <TableCell>
+                            {showReason ? (
+                              <div className="flex flex-col gap-1 min-w-[180px]">
+                                <Select
+                                  value={r.reason}
+                                  onValueChange={(v) => setReasonInputs({ ...reasonInputs, [l.id]: { ...r, reason: v } })}
+                                  disabled={isReadOnly}
+                                >
+                                  <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Elegir motivo..." /></SelectTrigger>
+                                  <SelectContent>
+                                    <SelectItem value="ROTURA">Rotura</SelectItem>
+                                    <SelectItem value="HURTO">Hurto</SelectItem>
+                                    <SelectItem value="ERROR_CARGA">Error de carga</SelectItem>
+                                    <SelectItem value="VENCIMIENTO">Vencimiento</SelectItem>
+                                    <SelectItem value="OTRO">Otro</SelectItem>
+                                  </SelectContent>
+                                </Select>
+                                <Input
+                                  className="h-8 text-xs"
+                                  placeholder="Nota (opcional)"
+                                  value={r.note}
+                                  onChange={(e) => setReasonInputs({ ...reasonInputs, [l.id]: { ...r, note: e.target.value } })}
+                                  disabled={isReadOnly}
+                                />
+                              </div>
+                            ) : (
+                              <span className="text-muted-foreground text-xs">—</span>
+                            )}
+                          </TableCell>
                         </TableRow>
                       );
                     })}
@@ -543,21 +608,41 @@ export function WeeklyCountMode() {
                           <TableHead className="text-center">Sistema</TableHead>
                           <TableHead className="text-center">Conteo</TableHead>
                           <TableHead className="text-center">Diferencia</TableHead>
+                          <TableHead>Motivo</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {previewDiffs.map((d: any) => (
-                          <TableRow key={d.id}>
-                            <TableCell>{d.product?.name} {d.product?.variant_label}</TableCell>
-                            <TableCell className="text-center font-mono">{d.system_qty}</TableCell>
-                            <TableCell className="text-center font-mono">{d.counted_qty}</TableCell>
-                            <TableCell className="text-center font-mono">
-                              <span className={d.diff_qty > 0 ? "text-emerald-600" : "text-red-600"}>
-                                {d.diff_qty > 0 ? `+${d.diff_qty}` : d.diff_qty}
-                              </span>
-                            </TableCell>
-                          </TableRow>
-                        ))}
+                        {previewDiffs.map((d: any) => {
+                          const reasonLabel: Record<string, string> = {
+                            ROTURA: "Rotura",
+                            HURTO: "Hurto",
+                            ERROR_CARGA: "Error de carga",
+                            VENCIMIENTO: "Vencimiento",
+                            OTRO: "Otro",
+                          };
+                          return (
+                            <TableRow key={d.id}>
+                              <TableCell>{d.product?.name} {d.product?.variant_label}</TableCell>
+                              <TableCell className="text-center font-mono">{d.system_qty}</TableCell>
+                              <TableCell className="text-center font-mono">{d.counted_qty}</TableCell>
+                              <TableCell className="text-center font-mono">
+                                <span className={d.diff_qty > 0 ? "text-emerald-600" : "text-red-600"}>
+                                  {d.diff_qty > 0 ? `+${d.diff_qty}` : d.diff_qty}
+                                </span>
+                              </TableCell>
+                              <TableCell className="text-sm">
+                                {d.diff_reason ? (
+                                  <>
+                                    <span className="font-medium">{reasonLabel[d.diff_reason] ?? d.diff_reason}</span>
+                                    {d.diff_note && <span className="text-muted-foreground">: {d.diff_note}</span>}
+                                  </>
+                                ) : (
+                                  <span className="text-red-600 text-xs">Falta motivo</span>
+                                )}
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
                       </TableBody>
                     </Table>
                   </div>

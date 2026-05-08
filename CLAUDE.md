@@ -133,6 +133,18 @@ Estas reglas son la fuente de verdad del negocio. Cualquier feature nueva en fin
 - `expected_amount` se snapshotea al guardar el arqueo — si después cambian las ventas del día, el valor original queda para auditar.
 - UI: `src/components/cierre/ArqueoCard.tsx`, integrada en Cierre del Día.
 
+### Conteo semanal de inventario
+
+- Flujo: el local cierra (típicamente domingos), el admin cuenta físicamente y carga `counted_qty` por producto. Si hay diferencia, debe seleccionar un motivo (`ROTURA`, `HURTO`, `ERROR_CARGA`, `VENCIMIENTO`, `OTRO`) + nota opcional. Al "Aplicar ajustes" el `qty_on_hand` queda igualado al conteo físico.
+- **Premisa operacional:** el conteo se hace con el local cerrado. No hay ventas durante el conteo, por eso `system_qty` se snapshotea al crear el conteo y no se recalcula al aplicar.
+- Tablas: `inventory_counts` (header, status `DRAFT` → `ADJUSTED` → `CLOSED`) e `inventory_count_lines` (una por producto activo con `track_stock=true`).
+- `inventory_count_lines.diff_qty` es columna **GENERATED** (`counted_qty - system_qty`). Nunca escribirla manualmente — Postgres la rechaza.
+- **Atomicidad:** `applyCountAdjustments` no hace SELECT/UPDATE separados. Todo pasa por `apply_inventory_count_atomic(p_count_id)`, que en una sola transacción: lockea el conteo (`FOR UPDATE`), valida `status = 'DRAFT'`, lockea `stock_balances` ordenado por `product_id`, inserta un `stock_movement` tipo `ADJUST` por cada diff != 0, upserta el balance, y marca el conteo como `ADJUSTED`. Mismo patrón que `create_sale_atomic`.
+- **Idempotencia:** la validación de status en la RPC bloquea doble-aplicación. Un segundo intento falla con `EXCEPTION` y rollback completo — el ledger nunca queda con duplicados.
+- **`save_inventory_count_draft(count_id, lines jsonb)`** reemplaza loops de N updates por un único `UPDATE ... FROM jsonb_array_elements`. Usar siempre esta RPC desde el cliente, no un loop de updates.
+- **Un solo conteo activo:** unique partial index `inventory_counts_one_active` impide tener dos conteos simultáneos en `DRAFT`/`ADJUSTED`. La UI captura ese error y muestra mensaje específico.
+- **Formato del `reason` en stock_movements:** `'Conteo {start}..{end} | {REASON_CODE}[: {note}]'`. El cliente (HistoryDrawer) parsea ese formato para mostrar badge legible. Si cambia el formato, actualizar `parseCountReason` en `src/components/stock/HistoryDrawer.tsx`.
+
 ### Cost snapshots
 
 - `pos_sale_items.cost_snapshot` guarda el costo unitario **al momento de la venta**, no se recalcula.
