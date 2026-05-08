@@ -9,7 +9,7 @@ interface Props {
 }
 
 export function ProtectedRoute({ children, allowedRoles }: Props) {
-  const { user, role, loading } = useAuth();
+  const { user, role, loading, primerIngreso } = useAuth();
 
   if (loading) {
     return (
@@ -20,6 +20,7 @@ export function ProtectedRoute({ children, allowedRoles }: Props) {
   }
 
   if (!user) return <Navigate to="/login" replace />;
+  if (primerIngreso) return <Navigate to="/primer-ingreso" replace />;
 
   if (allowedRoles && role && !allowedRoles.includes(role)) {
     // Redirect to their default route

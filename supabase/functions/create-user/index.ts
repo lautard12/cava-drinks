@@ -33,26 +33,35 @@ serve(async (req) => {
       .single();
     if (!callerRole) throw new Error("No autorizado");
 
-    const { email, password, display_name, role } = await req.json();
+    const { email, display_name, role } = await req.json();
 
-    // Create user
+    if (!email || !display_name || !role) {
+      throw new Error("Faltan campos requeridos");
+    }
+
+    const alphabet = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789@#!";
+    const tempPassword = Array.from(
+      { length: 12 },
+      () => alphabet[Math.floor(Math.random() * alphabet.length)]
+    ).join("");
+
     const { data: newUser, error: createError } = await supabase.auth.admin.createUser({
-      email,
-      password,
+      email: email.trim().toLowerCase(),
+      password: tempPassword,
       email_confirm: true,
       user_metadata: { display_name },
+      app_metadata: { primer_ingreso: true },
     });
 
     if (createError) throw createError;
 
-    // Assign role
     const { error: roleError } = await supabase
       .from("user_roles")
       .insert({ user_id: newUser.user!.id, role });
 
     if (roleError) throw roleError;
 
-    return new Response(JSON.stringify({ success: true }), {
+    return new Response(JSON.stringify({ success: true, tempPassword }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (err: any) {

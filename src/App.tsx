@@ -7,6 +7,7 @@ import { AuthProvider } from "@/hooks/useAuth";
 import { Layout } from "@/components/Layout";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
 import Login from "./pages/Login";
+import PrimerIngreso from "./pages/PrimerIngreso";
 import Stock from "./pages/Stock";
 import Products from "./pages/Products";
 import RestaurantMenu from "./pages/RestaurantMenu";
@@ -40,6 +41,7 @@ const App = () => (
         <BrowserRouter>
           <Routes>
             <Route path="/login" element={<Login />} />
+            <Route path="/primer-ingreso" element={<PrimerIngreso />} />
             <Route
               path="/*"
               element={

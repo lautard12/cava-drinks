@@ -10,7 +10,7 @@ import { useToast } from "@/hooks/use-toast";
 import { LogIn } from "lucide-react";
 
 export default function Login() {
-  const { user, role, loading } = useAuth();
+  const { user, role, loading, primerIngreso } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -18,6 +18,7 @@ export default function Login() {
 
   if (loading) return null;
   if (user) {
+    if (primerIngreso) return <Navigate to="/primer-ingreso" replace />;
     const dest = role === "cajero" ? "/caja" : role === "cocina" ? "/cocina" : "/stock";
     return <Navigate to={dest} replace />;
   }

@@ -2,12 +2,13 @@ import { createContext, useContext, useEffect, useState, ReactNode, useCallback 
 import { supabase } from "@/integrations/supabase/client";
 import type { User } from "@supabase/supabase-js";
 
-type AppRole = "admin" | "cajero" | "cocina";
+export type AppRole = "admin" | "cajero" | "cocina";
 
 interface AuthCtx {
   user: User | null;
   role: AppRole | null;
   loading: boolean;
+  primerIngreso: boolean;
   signOut: () => Promise<void>;
 }
 
@@ -15,8 +16,15 @@ const AuthContext = createContext<AuthCtx>({
   user: null,
   role: null,
   loading: true,
+  primerIngreso: false,
   signOut: async () => {},
 });
+
+export function homeForRole(role: AppRole | null): string {
+  if (role === "cajero") return "/caja";
+  if (role === "cocina") return "/cocina";
+  return "/stock";
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -65,8 +73,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setRole(null);
   };
 
+  const primerIngreso = user?.app_metadata?.primer_ingreso === true;
+
   return (
-    <AuthContext.Provider value={{ user, role, loading, signOut }}>
+    <AuthContext.Provider value={{ user, role, loading, primerIngreso, signOut }}>
       {children}
     </AuthContext.Provider>
   );

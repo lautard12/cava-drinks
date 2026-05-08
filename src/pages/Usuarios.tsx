@@ -27,7 +27,7 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
-import { Pencil, Plus, Trash2, Users } from "lucide-react";
+import { Copy, Pencil, Plus, Trash2, Users } from "lucide-react";
 
 type AppRole = "admin" | "cajero" | "cocina";
 
@@ -42,7 +42,9 @@ export default function Usuarios() {
   const qc = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
-  const [createForm, setCreateForm] = useState({ email: "", password: "", display_name: "", role: "cajero" as AppRole });
+  const [createdOpen, setCreatedOpen] = useState(false);
+  const [createdInfo, setCreatedInfo] = useState<{ email: string; tempPassword: string } | null>(null);
+  const [createForm, setCreateForm] = useState({ email: "", display_name: "", role: "cajero" as AppRole });
   const [editForm, setEditForm] = useState({ user_id: "", display_name: "", role: "cajero" as AppRole, password: "" });
   const [busy, setBusy] = useState(false);
 
@@ -62,23 +64,34 @@ export default function Usuarios() {
   });
 
   const handleCreate = async () => {
-    if (!createForm.email || !createForm.password || !createForm.display_name) {
+    if (!createForm.email || !createForm.display_name) {
       toast({ title: "Completá todos los campos", variant: "destructive" });
       return;
     }
     setBusy(true);
     const { data, error } = await supabase.functions.invoke("create-user", {
-      body: { email: createForm.email, password: createForm.password, display_name: createForm.display_name, role: createForm.role },
+      body: { email: createForm.email, display_name: createForm.display_name, role: createForm.role },
     });
     setBusy(false);
     if (error || data?.error) {
       toast({ title: "Error al crear usuario", description: error?.message || data?.error, variant: "destructive" });
       return;
     }
-    toast({ title: "Usuario creado correctamente" });
+    setCreatedInfo({ email: createForm.email, tempPassword: data.tempPassword });
     setCreateOpen(false);
-    setCreateForm({ email: "", password: "", display_name: "", role: "cajero" });
+    setCreatedOpen(true);
+    setCreateForm({ email: "", display_name: "", role: "cajero" });
     qc.invalidateQueries({ queryKey: ["admin-users"] });
+  };
+
+  const handleCopyPassword = async () => {
+    if (!createdInfo) return;
+    try {
+      await navigator.clipboard.writeText(createdInfo.tempPassword);
+      toast({ title: "Contraseña copiada al portapapeles" });
+    } catch {
+      toast({ title: "No se pudo copiar", variant: "destructive" });
+    }
   };
 
   const openEdit = (u: UserRow) => {
@@ -188,10 +201,9 @@ export default function Usuarios() {
               <Label>Email</Label>
               <Input type="email" value={createForm.email} onChange={(e) => setCreateForm({ ...createForm, email: e.target.value })} />
             </div>
-            <div className="space-y-2">
-              <Label>Contraseña</Label>
-              <Input type="password" value={createForm.password} onChange={(e) => setCreateForm({ ...createForm, password: e.target.value })} />
-            </div>
+            <p className="text-xs text-muted-foreground">
+              Se generará una contraseña temporal automáticamente. El usuario deberá cambiarla en su primer ingreso.
+            </p>
             <div className="space-y-2">
               <Label>Rol</Label>
               <Select value={createForm.role} onValueChange={(v) => setCreateForm({ ...createForm, role: v as AppRole })}>
@@ -240,6 +252,45 @@ export default function Usuarios() {
               {busy ? "Guardando…" : "Guardar cambios"}
             </Button>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Created Dialog (one-time password reveal) */}
+      <Dialog open={createdOpen} onOpenChange={setCreatedOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Usuario creado</DialogTitle>
+          </DialogHeader>
+          {createdInfo && (
+            <div className="space-y-4">
+              <div className="space-y-1">
+                <Label>Email</Label>
+                <p className="text-sm font-medium">{createdInfo.email}</p>
+              </div>
+              <div className="space-y-2">
+                <Label>Contraseña temporal</Label>
+                <div className="flex gap-2">
+                  <Input readOnly value={createdInfo.tempPassword} className="font-mono" />
+                  <Button type="button" variant="outline" size="icon" onClick={handleCopyPassword}>
+                    <Copy className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Esta contraseña no se vuelve a mostrar. Compartila con el usuario por un canal seguro.
+                En su primer ingreso le pediremos que la cambie.
+              </p>
+              <Button
+                className="w-full"
+                onClick={() => {
+                  setCreatedOpen(false);
+                  setCreatedInfo(null);
+                }}
+              >
+                Listo
+              </Button>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>
